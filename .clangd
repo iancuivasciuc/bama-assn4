@@ -1,0 +1,12 @@
+CompileFlags:
+  Add:
+    - "-nostdinc++"
+    - "-nostdlibinc"
+    - "-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS"
+  Remove:
+    - "-fno-rtti"
+    - "-fno-exceptions"
+    - "-fno-stack-protector"
+    - "-fabi-version=2"
+    - "-fomit-frame-pointer"
+
