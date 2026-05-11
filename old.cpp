@@ -5,9 +5,9 @@
 #include <stdio.h>
 #include <fstream>
 /* Undefine these to get some feedback about what your pintool is doing. */
-//#define PRINT_BASIC_BLOCKS /* show basic block addresses when instrumenting them */
-//#define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
-//#define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
+// #define PRINT_BASIC_BLOCKS /* show basic block addresses when instrumenting them */
+// #define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
+// #define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
 
 KNOB<std::string> KnobInputFile(KNOB_MODE_WRITEONCE, "pintool", "i", "input.txt", "specify input file to be tainted");
 
@@ -181,8 +181,6 @@ inline unsigned getTaintReg(REG reg) {
 	}
 }
 
-#define IDENTITY_FILE_SIZE 4096
-
 typedef uint16_t tag_t;
 
 /* Given an address, return the corresponding shadow memory (where we'll store the taint tags). */
@@ -191,33 +189,149 @@ inline tag_t *addrToShadow(const void *addr) {
 }
 
 tag_t g_regTags[TREG_END];
-char g_ident[IDENTITY_FILE_SIZE];
 
-/*
- * This is an example callback for memset().
- */
+#define IDENTITY_FILE_MAX 4096 
+char g_ident[IDENTITY_FILE_MAX];
+
+/* Standard library hooks */
 void before_memset(char *dest, int c, size_t n) {
-	tag_t *destShadow = addrToShadow(dest);
+    tag_t *shadow = addrToShadow(dest);
+    for (unsigned i = 0; i < n; ++i)
+        shadow[i] = g_regTags[REG_SIL];
+}
 
-	// TODO: You should fix this to do the right thing.
-	// Where does the taint come from for memset..?
-	// (Where do memset parameters come from, on x86_64?)
-	for (unsigned i = 0; i < n; ++i)
-		*(destShadow + i) = 0;
+void before_memset_chk(char *dest, int c, size_t n, size_t destlen) {
+    tag_t *shadow = addrToShadow(dest);
+    size_t mn = n < destlen ? n : destlen;
+    for (unsigned i = 0; i < mn; ++i)
+        shadow[i] = g_regTags[REG_SIL];
+}
+
+void before_memcpy(char *dest, const char *src, size_t n) {
+    tag_t *srcShadow = addrToShadow(src);
+    tag_t *destShadow = addrToShadow(dest);
+    for (unsigned i = 0; i < n; ++i)
+        destShadow[i] = srcShadow[i];
+}
+
+void before_memcmp(const char *s1, const char *s2, size_t n) {
+    tag_t *s1Shadow = addrToShadow(s1);
+    tag_t *s2Shadow = addrToShadow(s2);
+    for (unsigned i = 0; i < n; ++i) {
+        if (s1Shadow[i] > 0)
+            g_ident[s1Shadow[i] - 1] = s2[i]; 
+        if (s2Shadow[i] > 0)
+            g_ident[s2Shadow[i] - 1] = s1[i];
+    }
+}
+
+void before_strcmp(const char *s1, const char *s2) {
+    tag_t *s1Shadow = addrToShadow(s1);
+    tag_t *s2Shadow = addrToShadow(s2);
+    unsigned i = 0;
+    for (;;) {
+        if (s1Shadow[i] > 0)
+            g_ident[s1Shadow[i] - 1] = s2[i]; 
+        if (s2Shadow[i] > 0)
+            g_ident[s2Shadow[i] - 1] = s1[i];
+
+        if (s1[i] == '\0' || s2[i] == '\0')
+            break;
+
+        i++;
+    }
+}
+
+void before_strncmp(const char *s1, const char *s2, size_t n) {
+    tag_t *s1Shadow = addrToShadow(s1);
+    tag_t *s2Shadow = addrToShadow(s2);
+    for (unsigned i = 0; i < n; ++i) {
+        if (s1Shadow[i] > 0)
+            g_ident[s1Shadow[i] - 1] = s2[i]; 
+        if (s2Shadow[i] > 0)
+            g_ident[s2Shadow[i] - 1] = s1[i];
+
+        if (s1[i] == '\0' || s2[i] == '\0')
+            break;
+    }
 }
 
 /* PIN calls this when a new image (binary/library) is loaded */
 void ImageLoad(IMG img, void *) {
-	/* Call the before_memset function before any function called 'memset'. */
-	RTN rtn = RTN_FindByName(img, "memset");
-	if (RTN_Valid(rtn)) {
-		RTN_Open(rtn);
-		/* TODO: Maybe use IARG_FUNCARG_ENTRYPOINT_VALUE to get valid parameters passed to memset here..? */
-		// RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)before_memset, IARG_END);
-		RTN_Close(rtn);
-	}
+    if (!IMG_IsMainExecutable(img))
+        return;
 
-	/* TODO: instrument other functions? */
+    RTN rtn = RTN_FindByName(img, "memset");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memset,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "__memset_chk");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memset_chk,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 3,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "memcpy");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memcpy,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "memcmp");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memcmp,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "strcmp");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_strcmp,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "strncmp");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_strncmp,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
 }
 
 static void handle_clear_mem(unsigned N, char *addr) {
@@ -236,13 +350,13 @@ static void handle_clear_reg(unsigned N, unsigned reg) {
 			g_regTags[reg + n] = 0;
 }
 
-/* Move handlers */
 static void handle_mov_memtomem(unsigned N, char *to, char *from) {
 	tag_t *shadowTo = addrToShadow(to);
 	tag_t *shadowFrom = addrToShadow(from);
 
-	for (unsigned n = 0; n < N; ++n)
+	for (unsigned n = 0; n < N; ++n) {
         shadowTo[n] = shadowFrom[n];
+	}
 }
 
 static void handle_mov_memtoreg(unsigned N, char *addr, unsigned reg) {
@@ -260,8 +374,9 @@ static void handle_mov_memtoreg(unsigned N, char *addr, unsigned reg) {
 static void handle_mov_regtomem(unsigned N, char *addr, uint64_t reg) {
 	tag_t *shadow = addrToShadow(addr);
 
-	for (unsigned n = 0; n < N; ++n)
+	for (unsigned n = 0; n < N; ++n) {
         shadow[n] = g_regTags[reg + n];
+	}
 }
 
 static void handle_mov_regtoreg(unsigned N, uint64_t to, uint64_t from) {
@@ -272,45 +387,6 @@ static void handle_mov_regtoreg(unsigned N, uint64_t to, uint64_t from) {
 	if (N == 4)
 		for (unsigned n = 4; n < 8; ++n)
 			g_regTags[to + n] = 0;
-}
-
-static void handle_mov(INS ins) {
-    if (INS_OperandIsMemory(ins, 1)) {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_mov_memtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_MEMORYREAD_EA,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_END);
-    } else if (INS_OperandIsImmediate(ins, 1)) {
-        if (INS_OperandIsMemory(ins, 0)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_clear_mem,
-                    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                    IARG_MEMORYWRITE_EA,
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_clear_reg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_END);
-        }
-    } else if (INS_OperandIsMemory(ins, 0)) {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_mov_regtomem,
-                IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                IARG_MEMORYWRITE_EA,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                IARG_END);
-    } else {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_mov_regtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                IARG_END);
-    }
 }
 
 static void handle_movzx_memtoreg(unsigned N, char *addr, uint64_t reg, uint32_t srcbytes) {
@@ -339,138 +415,74 @@ static void handle_movzx_regtoreg(unsigned N, uint64_t to, uint64_t from, uint32
 			g_regTags[to + n] = 0;
 }
 
-static void handle_movzx(INS ins) {
-    if (INS_OperandIsMemory(ins, 1)) {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_movzx_memtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_MEMORYREAD_EA,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_UINT32, INS_OperandWidth(ins, 1)/8,
-                IARG_END);
-    } else {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_movzx_regtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                IARG_UINT32, INS_OperandWidth(ins, 1)/8,
-                IARG_END);
-    }
-}
-
-/* Compare handlers */
 static void handle_cmp_regtoreg(unsigned N, uint32_t reg1, uint32_t reg2, ADDRINT val1, ADDRINT val2) {
     for (unsigned n = 0; n < N; ++n) {
-        tag_t tag1 = g_regTags[reg1 + n];
-        tag_t tag2 = g_regTags[reg2 + n];
-
-        if (tag1 && tag2) {
-            printf("I don't think this can happen!\n");
-            return;
-        }
-
-        if (tag1)
-            g_ident[tag1 - 1] = (val2 >> (n * 8)) & 0xFF;
-
-        if (tag2)
-            g_ident[tag2 - 1] = (val1 >> (n * 8)) & 0xFF;
+        if (g_regTags[reg1 + n] > 0)
+            g_ident[g_regTags[reg1 + n] - 1] = (val2 >> (n * 8)) & 0xFF;
+        if (g_regTags[reg2 + n] > 0)
+            g_ident[g_regTags[reg2 + n] - 1] = (val1 >> (n * 8)) & 0xFF;
     }
 }
 
-static void handle_cmp_memtoreg(unsigned N, uint32_t reg, char *addr, ADDRINT reg_val) {
+static void handle_cmp_memtoreg(unsigned N, char *addr, uint32_t reg, ADDRINT reg_val) {
     tag_t *shadow = addrToShadow(addr);
-
     for (unsigned n = 0; n < N; ++n) {
-        tag_t tag = g_regTags[reg + n];
-
-        if (tag)
-            g_ident[tag - 1] = addr[n];
-
+        if (g_regTags[reg + n])
+            g_ident[g_regTags[reg + n] - 1] = addr[n];
         if (shadow[n])
             g_ident[shadow[n] - 1] = (reg_val >> (n * 8)) & 0xFF;
     }
 }
 
-static void handle_cmp_immtoreg(unsigned N, uint32_t reg, uint64_t imm) {
+static void handle_cmp_immtoreg(unsigned N, uint64_t imm, uint32_t reg) {
     for (unsigned n = 0; n < N; ++n) {
-        tag_t tag = g_regTags[reg + n];
-
-        if (tag)
-            g_ident[tag - 1] = (imm >> (n * 8)) & 0xFF;
+        if (g_regTags[reg + n])
+            g_ident[g_regTags[reg + n] - 1] = (imm >> (n * 8)) & 0xFF;
     }
 }
 
-static void handle_cmp_immtomem(unsigned N, char *addr, uint64_t imm) {
+static void handle_cmp_immtomem(unsigned N, uint64_t imm, char *addr) {
     tag_t *shadow = addrToShadow(addr);
-
     for (unsigned n = 0; n < N; ++n) {
         if (shadow[n])
             g_ident[shadow[n] - 1] = (imm >> (n * 8)) & 0xFF;
     }
 }
 
-static void handle_cmp(INS ins) {
-    if (INS_OperandIsReg(ins, 0)) {
-        if (INS_OperandIsReg(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_regtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
-                    IARG_END);
-        } else if (INS_OperandIsMemory(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_memtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_MEMORYREAD_EA,
-                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_immtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_UINT64, INS_OperandImmediate(ins, 1),
-                    IARG_END);
+static void handle_arith_regtoreg(unsigned N, uint32_t dest, uint32_t src) {
+    for (unsigned n = 0; n < N; ++n) {
+        if (g_regTags[src + n] && g_regTags[dest + n]) {
+            printf("Does this ever happen?\n");
         }
-    } else {
-        if (INS_OperandIsReg(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_memtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 1)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                    IARG_MEMORYREAD_EA,
-                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_immtomem,
-                    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                    IARG_UINT64, INS_OperandImmediate(ins, 1),
-                    IARG_MEMORYREAD_EA,
-                    IARG_END);
+        if (g_regTags[src + n]) {
+            g_regTags[dest + n] = g_regTags[src + n];
         }
     }
+
+    if (N == 4)
+        for (unsigned n = 4; n < 8; ++n)
+            g_regTags[dest + n] = 0;
 }
 
-/* Arithmetic handlers */
-static void handle_arith(INS ins) {
-    if (INS_OperandIsReg(ins, 0)) {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_clear_reg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_END);
-    } else {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_clear_mem,
-                IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                IARG_MEMORYWRITE_EA,
-                IARG_END);
+static void handle_arith_memtoreg(unsigned N, uint32_t dest, char *addr) {
+    tag_t *shadow = addrToShadow(addr);
+    for (unsigned n = 0; n < N; ++n) {
+        if (shadow[n]) {
+            g_regTags[dest + n] = shadow[n];
+        }
+    }
+
+    if (N == 4)
+        for (unsigned n = 4; n < 8; ++n)
+            g_regTags[dest + n] = 0;
+}
+
+static void handle_arith_regtomem(unsigned N, char *addr, uint32_t src) {
+    tag_t *shadow = addrToShadow(addr);
+    for (unsigned n = 0; n < N; ++n) {
+        if (g_regTags[src + n]) {
+            shadow[n] = g_regTags[src + n];
+        }
     }
 }
 
@@ -485,7 +497,50 @@ void Instrument(INS ins, void *) {
 	switch (ins_opcode) {
 	case XED_ICLASS_CMP:
     case XED_ICLASS_TEST:
-        handle_cmp(ins);
+        if (INS_OperandIsReg(ins, 0)) {
+            if (INS_OperandIsReg(ins, 1)) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_regtoreg,
+					    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+				    	IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+				    	IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                        IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                        IARG_REG_VALUE, INS_OperandReg(ins, 1),
+                        IARG_END);
+            } else if (INS_OperandIsMemory(ins, 1)) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_memtoreg,
+					    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                        IARG_MEMORYREAD_EA,
+				    	IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                        IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                        IARG_END);
+            } else {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_immtoreg,
+					    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                        IARG_UINT64, INS_OperandImmediate(ins, 1),
+				    	IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                        IARG_END);
+            }
+        } else {
+            if (INS_OperandIsReg(ins, 1)) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_memtoreg,
+					    IARG_UINT32, getRegSize(INS_OperandReg(ins, 1)),
+                        IARG_MEMORYREAD_EA,
+				    	IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                        IARG_REG_VALUE, INS_OperandReg(ins, 1),
+                        IARG_END);
+            } else {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_immtomem,
+					    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
+                        IARG_UINT64, INS_OperandImmediate(ins, 1),
+                        IARG_MEMORYREAD_EA,
+                        IARG_END);
+            }
+        }
 		break;
 	case XED_ICLASS_ADD:
 	case XED_ICLASS_SUB:
@@ -496,11 +551,84 @@ void Instrument(INS ins, void *) {
 	case XED_ICLASS_XOR:
 	case XED_ICLASS_AND:
 	case XED_ICLASS_OR:
-        handle_arith(ins);
+        if (ins_opcode == XED_ICLASS_XOR &&
+            INS_OperandIsReg(ins, 0) && 
+            INS_OperandIsReg(ins, 1) && 
+            INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
+            
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_clear_reg,
+                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                    IARG_END);
+            break;
+        }
+
+        if (INS_OperandIsReg(ins, 0)) {
+            if (INS_OperandIsReg(ins, 1)) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_arith_regtoreg,
+                        IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                        IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                        IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                        IARG_END);
+            } else if (INS_OperandIsMemory(ins, 1)) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_arith_memtoreg,
+                        IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                        IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                        IARG_MEMORYREAD_EA,
+                        IARG_END);
+            } 
+        } else if (INS_OperandIsMemory(ins, 0)) {
+            if (INS_OperandIsReg(ins, 1)) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_arith_regtomem,
+                        IARG_UINT32, INS_OperandWidth(ins, 0)/8,
+                        IARG_MEMORYWRITE_EA,
+                        IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                        IARG_END);
+            }
+        }
 		break;
 	case XED_ICLASS_MOV:
 		/* We implemented MOV for you (except one bit in a helper function, above, for you to fill in). */
-        handle_mov(ins);
+		if (INS_OperandIsMemory(ins, 1)) {
+			INS_InsertCall(ins, IPOINT_BEFORE,
+				(AFUNPTR)handle_mov_memtoreg,
+				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+				IARG_MEMORYREAD_EA,
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+				IARG_END);
+		} else if (INS_OperandIsImmediate(ins, 1)) {
+			if (INS_OperandIsMemory(ins, 0)) {
+				INS_InsertCall(ins, IPOINT_BEFORE,
+					(AFUNPTR)handle_clear_mem,
+					IARG_UINT32, INS_OperandWidth(ins, 0)/8,
+					IARG_MEMORYWRITE_EA,
+					IARG_END);
+			} else {
+				INS_InsertCall(ins, IPOINT_BEFORE,
+					(AFUNPTR)handle_clear_reg,
+					IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+					IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+					IARG_END);
+			}
+		} else if (INS_OperandIsMemory(ins, 0)) {
+			INS_InsertCall(ins, IPOINT_BEFORE,
+				(AFUNPTR)handle_mov_regtomem,
+				IARG_UINT32, INS_OperandWidth(ins, 0)/8,
+				IARG_MEMORYWRITE_EA,
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+				IARG_END);
+		} else {
+			INS_InsertCall(ins, IPOINT_BEFORE,
+				(AFUNPTR)handle_mov_regtoreg,
+				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+				IARG_END);
+		}
 		break;
 	case XED_ICLASS_MOVSX:
 	case XED_ICLASS_MOVSXD:
@@ -509,8 +637,25 @@ void Instrument(INS ins, void *) {
 		 * This is incorrect but should be enough for this assignment.
 		 */
 	case XED_ICLASS_MOVZX:
-        handle_movzx(ins);
+		if (INS_OperandIsMemory(ins, 1)) {
+			INS_InsertCall(ins, IPOINT_BEFORE,
+				(AFUNPTR)handle_movzx_memtoreg,
+				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+				IARG_MEMORYREAD_EA,
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+				IARG_UINT32, INS_OperandWidth(ins, 1)/8,
+				IARG_END);
+		} else {
+			INS_InsertCall(ins, IPOINT_BEFORE,
+				(AFUNPTR)handle_movzx_regtoreg,
+				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+				IARG_UINT32, INS_OperandWidth(ins, 1)/8,
+				IARG_END);
+		}
 		break;
+
 	case XED_ICLASS_MOVBE:
 	case XED_ICLASS_MOVQ:
 	case XED_ICLASS_MOVD:
@@ -550,6 +695,7 @@ void Instrument(INS ins, void *) {
 					IARG_END);
 		}
 		break;
+
 	case XED_ICLASS_PUSH:
 		/* We implemented PUSH/POP for you. */
 		if (INS_OperandIsReg(ins, 0)) {
@@ -591,6 +737,7 @@ void Instrument(INS ins, void *) {
 				IARG_END);
 		}
 		break;
+
 	default:
 #ifdef PRINT_UNHANDLED_INSTS
 		printf("unhandled @%p: %s\n", (void *)INS_Address(ins), INS_Disassemble(ins).c_str());
@@ -688,12 +835,12 @@ void Trace(TRACE trace, void *) {
 }
 
 void Fini(INT32 code, void *) {
-    std::ofstream out("out.txt", std::ios::binary);
-    out.write((const char*)g_ident, IDENTITY_FILE_SIZE);
+    std::ofstream out("data/part3.txt", std::ios::binary);
+    out.write((const char*)g_ident, IDENTITY_FILE_MAX);
     out.close();
 
     int count = 0;
-    for (unsigned n = 0; n < IDENTITY_FILE_SIZE; ++n) {
+    for (unsigned n = 0; n < IDENTITY_FILE_MAX; ++n) {
         if (g_ident[n] != 'X') {
             count++;
         }
