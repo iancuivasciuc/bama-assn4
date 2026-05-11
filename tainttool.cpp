@@ -193,33 +193,145 @@ inline tag_t *addrToShadow(const void *addr) {
 tag_t g_regTags[TREG_END];
 char g_ident[IDENTITY_FILE_SIZE];
 
-/*
- * This is an example callback for memset().
- */
+/* Standard library hooks */
 void before_memset(char *dest, int c, size_t n) {
-	tag_t *destShadow = addrToShadow(dest);
+    tag_t *shadow = addrToShadow(dest);
 
-	// TODO: You should fix this to do the right thing.
-	// Where does the taint come from for memset..?
-	// (Where do memset parameters come from, on x86_64?)
-	for (unsigned i = 0; i < n; ++i)
-		*(destShadow + i) = 0;
+    for (unsigned i = 0; i < n; ++i)
+        shadow[i] = g_regTags[REG_SIL];
+}
+
+void before_memcpy(char *dest, const char *src, size_t n) {
+    tag_t *srcShadow = addrToShadow(src);
+    tag_t *destShadow = addrToShadow(dest);
+
+    for (unsigned i = 0; i < n; ++i)
+        destShadow[i] = srcShadow[i];
+}
+
+void before_memcmp(const char *s1, const char *s2, size_t n) {
+    tag_t *s1Shadow = addrToShadow(s1);
+    tag_t *s2Shadow = addrToShadow(s2);
+
+    for (unsigned i = 0; i < n; ++i) {
+        if (s1Shadow[i] > 0)
+            g_ident[s1Shadow[i] - 1] = s2[i]; 
+        if (s2Shadow[i] > 0)
+            g_ident[s2Shadow[i] - 1] = s1[i];
+    }
+}
+
+void before_strcmp(const char *s1, const char *s2) {
+    tag_t *s1Shadow = addrToShadow(s1);
+    tag_t *s2Shadow = addrToShadow(s2);
+
+    unsigned i = 0;
+    for (;;) {
+        if (s1Shadow[i] > 0)
+            g_ident[s1Shadow[i] - 1] = s2[i]; 
+        if (s2Shadow[i] > 0)
+            g_ident[s2Shadow[i] - 1] = s1[i];
+
+        if (s1[i] == '\0' || s2[i] == '\0')
+            break;
+
+        i++;
+    }
+}
+
+void before_strncmp(const char *s1, const char *s2, size_t n) {
+    tag_t *s1Shadow = addrToShadow(s1);
+    tag_t *s2Shadow = addrToShadow(s2);
+
+    for (unsigned i = 0; i < n; ++i) {
+        if (s1Shadow[i] > 0)
+            g_ident[s1Shadow[i] - 1] = s2[i]; 
+        if (s2Shadow[i] > 0)
+            g_ident[s2Shadow[i] - 1] = s1[i];
+
+        if (s1[i] == '\0' || s2[i] == '\0')
+            break;
+    }
 }
 
 /* PIN calls this when a new image (binary/library) is loaded */
 void ImageLoad(IMG img, void *) {
-	/* Call the before_memset function before any function called 'memset'. */
-	RTN rtn = RTN_FindByName(img, "memset");
-	if (RTN_Valid(rtn)) {
-		RTN_Open(rtn);
-		/* TODO: Maybe use IARG_FUNCARG_ENTRYPOINT_VALUE to get valid parameters passed to memset here..? */
-		// RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)before_memset, IARG_END);
-		RTN_Close(rtn);
-	}
+    if (!IMG_IsMainExecutable(img))
+        return;
 
-	/* TODO: instrument other functions? */
+    RTN rtn = RTN_FindByName(img, "memset");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memset,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "__memset_chk");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memset,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "memcpy");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memcpy,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "memcmp");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_memcmp,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "strcmp");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_strcmp,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_END);
+        RTN_Close(rtn);
+    }
+
+	rtn = RTN_FindByName(img, "strncmp");
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        RTN_InsertCall(rtn, IPOINT_BEFORE,
+                (AFUNPTR)before_strncmp,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_END);
+        RTN_Close(rtn);
+    }
 }
 
+/* Clear handlers */
 static void handle_clear_mem(unsigned N, char *addr) {
 	tag_t *shadow = addrToShadow(addr);
 
