@@ -6,7 +6,7 @@
 #include <fstream>
 /* Undefine these to get some feedback about what your pintool is doing. */
 //#define PRINT_BASIC_BLOCKS /* show basic block addresses when instrumenting them */
-//#define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
+// #define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
 //#define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
 
 KNOB<std::string> KnobInputFile(KNOB_MODE_WRITEONCE, "pintool", "i", "input.txt", "specify input file to be tainted");
@@ -570,18 +570,125 @@ static void handle_cmp(INS ins) {
 }
 
 /* Arithmetic handlers */
+static void handle_arith_regtoreg(unsigned N, uint32_t dest, uint32_t src) {
+    for (unsigned n = 0; n < N; ++n) {
+        if (g_regTags[src + n])
+            g_regTags[dest + n] = g_regTags[src + n];
+    }
+
+    if (N == 4)
+        for (unsigned n = 4; n < 8; ++n)
+            g_regTags[dest + n] = 0;
+}
+
+static void handle_arith_memtoreg(unsigned N, uint32_t dest, char *addr) {
+    tag_t *shadow = addrToShadow(addr);
+
+    for (unsigned n = 0; n < N; ++n) {
+        if (shadow[n])
+            g_regTags[dest + n] = shadow[n];
+    }
+
+    if (N == 4)
+        for (unsigned n = 4; n < 8; ++n)
+            g_regTags[dest + n] = 0;
+}
+
+static void handle_arith_immtoreg(unsigned N, uint32_t dest) {
+    if (N == 4)
+        for (unsigned n = 4; n < 8; ++n)
+            g_regTags[dest + n] = 0;
+}
+
+static void handle_arith_regtomem(unsigned N, char *addr, uint32_t src) {
+    tag_t *shadow = addrToShadow(addr);
+
+    for (unsigned n = 0; n < N; ++n) {
+        if (g_regTags[src + n])
+            shadow[n] = g_regTags[src + n];
+    }
+}
+
+// static void handle_arith_immtomem(unsigned N, char *addr, uint32_t src) {
+//
+// }
+
 static void handle_arith(INS ins) {
     if (INS_OperandIsReg(ins, 0)) {
+        if (INS_OperandIsReg(ins, 1)) {
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_arith_regtoreg,
+                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                    IARG_END);
+        } else if (INS_OperandIsMemory(ins, 1)) {
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_arith_memtoreg,
+                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                    IARG_MEMORYREAD_EA,
+                    IARG_END);
+        } else {
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_arith_immtoreg,
+                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                    IARG_END);
+        }
+    } else if (INS_OperandIsMemory(ins, 0)) {
+        if (INS_OperandIsReg(ins, 1)) {
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_arith_regtomem,
+                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 1)),
+                    IARG_MEMORYWRITE_EA,
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                    IARG_END);
+        }
+    }
+}
+
+/* Shift operation handles */
+static void handle_shl_reg(uint32_t dest) {
+    g_regTags[dest + 3] = g_regTags[dest + 1];
+    g_regTags[dest + 2] = g_regTags[dest + 0];
+
+    g_regTags[dest + 1] = 0;
+    g_regTags[dest + 0] = 0;
+
+    g_regTags[dest + 4] = 0;
+    g_regTags[dest + 5] = 0;
+    g_regTags[dest + 6] = 0;
+    g_regTags[dest + 7] = 0;
+}
+
+static void handle_shl(INS ins) {
+    if (INS_OperandIsReg(ins, 1)) {
         INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_clear_reg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                (AFUNPTR)handle_shl_reg,
                 IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
                 IARG_END);
-    } else {
+    }
+}
+
+static void handle_shr_reg(uint32_t dest) {
+    g_regTags[dest + 0] = g_regTags[dest + 2];
+    g_regTags[dest + 1] = g_regTags[dest + 3];
+
+    g_regTags[dest + 2] = 0;
+    g_regTags[dest + 3] = 0;
+
+    g_regTags[dest + 4] = 0;
+    g_regTags[dest + 5] = 0;
+    g_regTags[dest + 6] = 0;
+    g_regTags[dest + 7] = 0;
+}
+
+static void handle_shr(INS ins) {
+    if (INS_OperandIsReg(ins, 1)) {
         INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_clear_mem,
-                IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                IARG_MEMORYWRITE_EA,
+                (AFUNPTR)handle_shr_reg,
+                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
                 IARG_END);
     }
 }
@@ -599,15 +706,31 @@ void Instrument(INS ins, void *) {
     case XED_ICLASS_TEST:
         handle_cmp(ins);
 		break;
+	case XED_ICLASS_SHL:
+	       handle_shl(ins);
+	       break;
+	case XED_ICLASS_SHR:
+	       handle_shr(ins);
+	       break;
 	case XED_ICLASS_ADD:
 	case XED_ICLASS_SUB:
 	case XED_ICLASS_SBB:
-	case XED_ICLASS_SHL:
-	case XED_ICLASS_SHR:
 	case XED_ICLASS_ROR:
 	case XED_ICLASS_XOR:
 	case XED_ICLASS_AND:
 	case XED_ICLASS_OR:
+        if (ins_opcode == XED_ICLASS_XOR &&
+            INS_OperandIsReg(ins, 0) && 
+            INS_OperandIsReg(ins, 1) && 
+            INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
+
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_clear_reg,
+                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
+                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                    IARG_END);
+            break;
+        }
         handle_arith(ins);
 		break;
 	case XED_ICLASS_MOV:
