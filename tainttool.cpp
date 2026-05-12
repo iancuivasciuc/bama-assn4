@@ -4,10 +4,11 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <fstream>
+#include <vector>
 /* Undefine these to get some feedback about what your pintool is doing. */
 //#define PRINT_BASIC_BLOCKS /* show basic block addresses when instrumenting them */
 // #define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
-//#define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
+#define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
 
 KNOB<std::string> KnobInputFile(KNOB_MODE_WRITEONCE, "pintool", "i", "input.txt", "specify input file to be tainted");
 
@@ -192,6 +193,13 @@ inline tag_t *addrToShadow(const void *addr) {
 
 tag_t g_regTags[TREG_END];
 char g_ident[IDENTITY_FILE_SIZE];
+
+struct TaintOp {
+    uint32_t opcode;
+    uint8_t value;
+};
+
+std::vector<TaintOp> g_taint_history[IDENTITY_FILE_SIZE];
 
 /* Standard library hooks */
 void before_memset(char *dest, int c, size_t n) {
@@ -470,6 +478,33 @@ static void handle_movzx(INS ins) {
                 IARG_END);
     }
 }
+static uint8_t compute_val(uint8_t val, tag_t tag) {
+    // uint8_t result = val;
+
+    if (!g_taint_history[tag].empty()) {
+        // printf("--- For Byte: %u ---\n", tag);
+
+        for (auto it : g_taint_history[tag]) {
+            uint32_t opcode = it.opcode;
+            uint8_t op_val  = it.value;
+
+            if (opcode == 10) {
+                // printf("\tADD %hhu\n", op_val);
+            } else if (opcode == 908) {
+                // printf("\tSUB %hhu\n", op_val);
+            } else if (opcode == 1838) {
+                return val ^ op_val;
+                // printf("\tXOR %hhu\n", op_val);
+            } else if (opcode == 565) {
+                // printf("\tOR %hhu\n", op_val);
+            } else {
+                // printf("\tUnknown!\n");
+            }
+        }
+    }
+
+    return val; 
+}
 
 /* Compare handlers */
 static void handle_cmp_regtoreg(unsigned N, uint32_t reg1, uint32_t reg2, ADDRINT val1, ADDRINT val2) {
@@ -477,16 +512,11 @@ static void handle_cmp_regtoreg(unsigned N, uint32_t reg1, uint32_t reg2, ADDRIN
         tag_t tag1 = g_regTags[reg1 + n];
         tag_t tag2 = g_regTags[reg2 + n];
 
-        if (tag1 && tag2) {
-            printf("I don't think this can happen!\n");
-            return;
-        }
-
         if (tag1)
-            g_ident[tag1 - 1] = (val2 >> (n * 8)) & 0xFF;
+            g_ident[tag1 - 1] = compute_val((val2 >> (n * 8)) & 0xFF, tag1 - 1);
 
         if (tag2)
-            g_ident[tag2 - 1] = (val1 >> (n * 8)) & 0xFF;
+            g_ident[tag2 - 1] = compute_val((val1 >> (n * 8)) & 0xFF, tag2 - 1);
     }
 }
 
@@ -497,10 +527,10 @@ static void handle_cmp_memtoreg(unsigned N, uint32_t reg, char *addr, ADDRINT re
         tag_t tag = g_regTags[reg + n];
 
         if (tag)
-            g_ident[tag - 1] = addr[n];
+            g_ident[tag - 1] = compute_val(addr[n], tag - 1);
 
         if (shadow[n])
-            g_ident[shadow[n] - 1] = (reg_val >> (n * 8)) & 0xFF;
+            g_ident[shadow[n] - 1] = compute_val((reg_val >> (n * 8)) & 0xFF, shadow[n] - 1);
     }
 }
 
@@ -509,7 +539,7 @@ static void handle_cmp_immtoreg(unsigned N, uint32_t reg, uint64_t imm) {
         tag_t tag = g_regTags[reg + n];
 
         if (tag)
-            g_ident[tag - 1] = (imm >> (n * 8)) & 0xFF;
+            g_ident[tag - 1] = compute_val((imm >> (n * 8)) & 0xFF, tag - 1);
     }
 }
 
@@ -518,7 +548,7 @@ static void handle_cmp_immtomem(unsigned N, char *addr, uint64_t imm) {
 
     for (unsigned n = 0; n < N; ++n) {
         if (shadow[n])
-            g_ident[shadow[n] - 1] = (imm >> (n * 8)) & 0xFF;
+            g_ident[shadow[n] - 1] = compute_val((imm >> (n * 8)) & 0xFF, shadow[n] - 1);
     }
 }
 
@@ -570,50 +600,88 @@ static void handle_cmp(INS ins) {
 }
 
 /* Arithmetic handlers */
-static void handle_arith_regtoreg(unsigned N, uint32_t dest, uint32_t src) {
+static void handle_arith_regtoreg(unsigned N, uint32_t dst, uint32_t src, ADDRINT dst_val, ADDRINT src_val, uint32_t opcode) {
     for (unsigned n = 0; n < N; ++n) {
-        if (g_regTags[src + n])
-            g_regTags[dest + n] = g_regTags[src + n];
+        if (g_regTags[dst + n]) {
+            g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)((src_val >> (n * 8)) & 0xFF)});
+            // printf("[REGTOREG] DST Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
+        }
+
+        if (g_regTags[src + n]) {
+            g_taint_history[g_regTags[src + n] - 1].push_back({opcode, (uint8_t)((dst_val >> (n * 8)) & 0xFF)});
+            g_regTags[dst + n] = g_regTags[src + n];
+            // printf("[REGTOREG] SRC Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
+        }
     }
 
     if (N == 4)
         for (unsigned n = 4; n < 8; ++n)
-            g_regTags[dest + n] = 0;
+            g_regTags[dst + n] = 0;
 }
 
-static void handle_arith_memtoreg(unsigned N, uint32_t dest, char *addr) {
+static void handle_arith_memtoreg(unsigned N, uint32_t dst, char *addr, ADDRINT dst_val, uint32_t opcode) {
     tag_t *shadow = addrToShadow(addr);
 
     for (unsigned n = 0; n < N; ++n) {
-        if (shadow[n])
-            g_regTags[dest + n] = shadow[n];
+        if (g_regTags[dst + n]) {
+            g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)addr[n]});
+            // printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
+        }
+
+        if (shadow[n]) {
+            g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((dst_val >> (n * 8)) & 0xFF)});
+            g_regTags[dst + n] = shadow[n];
+            // printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
+        }
     }
 
     if (N == 4)
         for (unsigned n = 4; n < 8; ++n)
-            g_regTags[dest + n] = 0;
+            g_regTags[dst + n] = 0;
 }
 
-static void handle_arith_immtoreg(unsigned N, uint32_t dest) {
+static void handle_arith_immtoreg(unsigned N, uint32_t dst, uint64_t imm, uint32_t opcode) {
+    for (unsigned n = 0; n < N; ++n) {
+        if (g_regTags[dst + n]) {
+            g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)((imm >> (n * 8)) & 0xFF)});
+            // printf("[IMMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
+        }
+    }
+
     if (N == 4)
         for (unsigned n = 4; n < 8; ++n)
-            g_regTags[dest + n] = 0;
+            g_regTags[dst + n] = 0;
 }
 
-static void handle_arith_regtomem(unsigned N, char *addr, uint32_t src) {
+static void handle_arith_regtomem(unsigned N, char *addr, uint32_t src, ADDRINT src_val, uint32_t opcode) {
     tag_t *shadow = addrToShadow(addr);
 
     for (unsigned n = 0; n < N; ++n) {
-        if (g_regTags[src + n])
+        if (shadow[n]) {
+            g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((src_val >> (n * 8)) & 0xFF)});
+            // printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
+        }
+
+        if (g_regTags[src + n]) {
+            g_taint_history[g_regTags[src + n] - 1].push_back({opcode, (uint8_t)addr[n]});
             shadow[n] = g_regTags[src + n];
+            // printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
+        }
     }
 }
 
-// static void handle_arith_immtomem(unsigned N, char *addr, uint32_t src) {
-//
-// }
+static void handle_arith_immtomem(unsigned N, char *addr, uint64_t imm, uint32_t opcode) {
+    tag_t *shadow = addrToShadow(addr);
 
-static void handle_arith(INS ins) {
+    for (unsigned n = 0; n < N; ++n) {
+        if (shadow[n]) {
+            g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((imm >> (n * 8)) & 0xFF)});
+            // printf("[IMMTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
+        }
+    }
+}
+
+static void handle_arith(INS ins, uint32_t opcode) {
     if (INS_OperandIsReg(ins, 0)) {
         if (INS_OperandIsReg(ins, 1)) {
             INS_InsertCall(ins, IPOINT_BEFORE,
@@ -621,6 +689,9 @@ static void handle_arith(INS ins) {
                     IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
                     IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
                     IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
+                    IARG_UINT32, opcode,
                     IARG_END);
         } else if (INS_OperandIsMemory(ins, 1)) {
             INS_InsertCall(ins, IPOINT_BEFORE,
@@ -628,12 +699,16 @@ static void handle_arith(INS ins) {
                     IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
                     IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
                     IARG_MEMORYREAD_EA,
+                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                    IARG_UINT32, opcode,
                     IARG_END);
         } else {
             INS_InsertCall(ins, IPOINT_BEFORE,
                     (AFUNPTR)handle_arith_immtoreg,
                     IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
                     IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                    IARG_UINT64, INS_OperandImmediate(ins, 1),
+                    IARG_UINT32, opcode,
                     IARG_END);
         }
     } else if (INS_OperandIsMemory(ins, 0)) {
@@ -643,6 +718,16 @@ static void handle_arith(INS ins) {
                     IARG_UINT32, getRegSize(INS_OperandReg(ins, 1)),
                     IARG_MEMORYWRITE_EA,
                     IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
+                    IARG_UINT32, opcode,
+                    IARG_END);
+        } else {
+            INS_InsertCall(ins, IPOINT_BEFORE,
+                    (AFUNPTR)handle_arith_immtomem,
+                    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
+                    IARG_MEMORYWRITE_EA,
+                    IARG_UINT64, INS_OperandImmediate(ins, 1),
+                    IARG_UINT32, opcode,
                     IARG_END);
         }
     }
@@ -731,7 +816,7 @@ void Instrument(INS ins, void *) {
                     IARG_END);
             break;
         }
-        handle_arith(ins);
+        handle_arith(ins, ins_opcode);
 		break;
 	case XED_ICLASS_MOV:
 		/* We implemented MOV for you (except one bit in a helper function, above, for you to fill in). */
