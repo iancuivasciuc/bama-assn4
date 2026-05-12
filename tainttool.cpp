@@ -262,6 +262,19 @@ void before_strncmp(const char *s1, const char *s2, size_t n) {
     }
 }
 
+// void before_strtol(const char *nptr) {
+//     tag_t *shadow = addrToShadow(nptr);
+//     unsigned i = 0;
+//
+//     // strtol parses until it hits a null terminator (or an invalid char for the base)
+//     while (nptr[i] != '\0') {
+//         if (shadow[i] > 0) {
+//             printf("[strtol] Tainted data found! Byte '%c' (Tag: %u) is being parsed.\n", nptr[i], shadow[i] - 1);
+//         }
+//         i++;
+//     }
+// }
+
 /* PIN calls this when a new image (binary/library) is loaded */
 void ImageLoad(IMG img, void *) {
     if (!IMG_IsMainExecutable(img))
@@ -337,6 +350,15 @@ void ImageLoad(IMG img, void *) {
                 IARG_END);
         RTN_Close(rtn);
     }
+	// rtn = RTN_FindByName(img, "strtol");
+	//    if (RTN_Valid(rtn)) {
+	//        RTN_Open(rtn);
+	//        RTN_InsertCall(rtn, IPOINT_BEFORE,
+	//                (AFUNPTR)before_strtol,
+	//                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	//                IARG_END);
+	//        RTN_Close(rtn);
+	//    }
 }
 
 /* Clear handlers */
@@ -361,15 +383,19 @@ static void handle_mov_memtomem(unsigned N, char *to, char *from) {
 	tag_t *shadowTo = addrToShadow(to);
 	tag_t *shadowFrom = addrToShadow(from);
 
-	for (unsigned n = 0; n < N; ++n)
+	for (unsigned n = 0; n < N; ++n) {
+        // printf(" Byte found: %hu!\n", shadowFrom[n] - 1);
         shadowTo[n] = shadowFrom[n];
+    }
 }
 
 static void handle_mov_memtoreg(unsigned N, char *addr, unsigned reg) {
 	tag_t *shadow = addrToShadow(addr);
 
-	for (unsigned n = 0; n < N; ++n)
+	for (unsigned n = 0; n < N; ++n) {
+        // printf(" Byte found: %hu!\n", shadow[n] - 1);
 		g_regTags[reg + n] = shadow[n];
+    }
 
 	/* 32-bit register write, clear upper 64 bits */
 	if (N == 4)
@@ -380,13 +406,17 @@ static void handle_mov_memtoreg(unsigned N, char *addr, unsigned reg) {
 static void handle_mov_regtomem(unsigned N, char *addr, uint64_t reg) {
 	tag_t *shadow = addrToShadow(addr);
 
-	for (unsigned n = 0; n < N; ++n)
+	for (unsigned n = 0; n < N; ++n) {
+        // printf(" Byte found: %hu!\n", g_regTags[reg + n] - 1);
         shadow[n] = g_regTags[reg + n];
+    }
 }
 
 static void handle_mov_regtoreg(unsigned N, uint64_t to, uint64_t from) {
-	for (unsigned n = 0; n < N; ++n)
+	for (unsigned n = 0; n < N; ++n) {
+        // printf(" Byte found: %hu!\n", g_regTags[from + n] - 1);
 		g_regTags[to + n] = g_regTags[from + n];
+    }
 
 	/* 32-bit register write, clear upper 64 bits */
 	if (N == 4)
@@ -604,13 +634,13 @@ static void handle_arith_regtoreg(unsigned N, uint32_t dst, uint32_t src, ADDRIN
     for (unsigned n = 0; n < N; ++n) {
         if (g_regTags[dst + n]) {
             g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)((src_val >> (n * 8)) & 0xFF)});
-            // printf("[REGTOREG] DST Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
+            printf("[REGTOREG] DST Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
         }
 
         if (g_regTags[src + n]) {
             g_taint_history[g_regTags[src + n] - 1].push_back({opcode, (uint8_t)((dst_val >> (n * 8)) & 0xFF)});
             g_regTags[dst + n] = g_regTags[src + n];
-            // printf("[REGTOREG] SRC Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
+            printf("[REGTOREG] SRC Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
         }
     }
 
@@ -625,13 +655,13 @@ static void handle_arith_memtoreg(unsigned N, uint32_t dst, char *addr, ADDRINT 
     for (unsigned n = 0; n < N; ++n) {
         if (g_regTags[dst + n]) {
             g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)addr[n]});
-            // printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
+            printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
         }
 
         if (shadow[n]) {
             g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((dst_val >> (n * 8)) & 0xFF)});
             g_regTags[dst + n] = shadow[n];
-            // printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
+            printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
         }
     }
 
@@ -644,7 +674,7 @@ static void handle_arith_immtoreg(unsigned N, uint32_t dst, uint64_t imm, uint32
     for (unsigned n = 0; n < N; ++n) {
         if (g_regTags[dst + n]) {
             g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)((imm >> (n * 8)) & 0xFF)});
-            // printf("[IMMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
+            printf("[IMMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
         }
     }
 
@@ -659,13 +689,13 @@ static void handle_arith_regtomem(unsigned N, char *addr, uint32_t src, ADDRINT 
     for (unsigned n = 0; n < N; ++n) {
         if (shadow[n]) {
             g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((src_val >> (n * 8)) & 0xFF)});
-            // printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
+            printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
         }
 
         if (g_regTags[src + n]) {
             g_taint_history[g_regTags[src + n] - 1].push_back({opcode, (uint8_t)addr[n]});
             shadow[n] = g_regTags[src + n];
-            // printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
+            printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
         }
     }
 }
@@ -676,7 +706,7 @@ static void handle_arith_immtomem(unsigned N, char *addr, uint64_t imm, uint32_t
     for (unsigned n = 0; n < N; ++n) {
         if (shadow[n]) {
             g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((imm >> (n * 8)) & 0xFF)});
-            // printf("[IMMTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
+            printf("[IMMTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
         }
     }
 }
