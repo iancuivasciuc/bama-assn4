@@ -1,3 +1,4 @@
 obj-intel64/
+*.log
 *.txt
 NLQBox

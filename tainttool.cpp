@@ -194,17 +194,16 @@ __attribute__((always_inline)) inline tag_t *addrToShadow(const void *addr) {
 tag_t g_regTags[TREG_END];
 char g_ident[IDENTITY_FILE_SIZE];
 
-struct TaintOp {
-    uint32_t opcode;
-    uint8_t value;
-};
-
-std::vector<TaintOp> g_taint_history[IDENTITY_FILE_SIZE];
+// struct TaintOp {
+//     uint32_t opcode;
+//     uint8_t value;
+// };
+//
+// std::vector<TaintOp> g_taint_history[IDENTITY_FILE_SIZE];
 
 /* Standard library hooks */
 void before_memset(char *dest, int c, size_t n) {
     tag_t *shadow = addrToShadow(dest);
-
     for (unsigned i = 0; i < n; ++i)
         shadow[i] = g_regTags[getTaintReg(REG_SIL)];
 }
@@ -212,7 +211,6 @@ void before_memset(char *dest, int c, size_t n) {
 void before_memcpy(char *dest, const char *src, size_t n) {
     tag_t *srcShadow = addrToShadow(src);
     tag_t *destShadow = addrToShadow(dest);
-
     for (unsigned i = 0; i < n; ++i)
         destShadow[i] = srcShadow[i];
 }
@@ -220,12 +218,9 @@ void before_memcpy(char *dest, const char *src, size_t n) {
 void before_memcmp(const char *s1, const char *s2, size_t n) {
     tag_t *s1Shadow = addrToShadow(s1);
     tag_t *s2Shadow = addrToShadow(s2);
-
     for (unsigned i = 0; i < n; ++i) {
-        if (s1Shadow[i] > 0)
-            g_ident[s1Shadow[i]] = s2[i]; 
-        if (s2Shadow[i] > 0)
-            g_ident[s2Shadow[i]] = s1[i];
+        g_ident[s1Shadow[i]] = s2[i]; 
+        g_ident[s2Shadow[i]] = s1[i];
     }
 }
 
@@ -235,10 +230,8 @@ void before_strcmp(const char *s1, const char *s2) {
 
     unsigned i = 0;
     for (;;) {
-        if (s1Shadow[i] > 0)
-            g_ident[s1Shadow[i]] = s2[i]; 
-        if (s2Shadow[i] > 0)
-            g_ident[s2Shadow[i]] = s1[i];
+        g_ident[s1Shadow[i]] = s2[i]; 
+        g_ident[s2Shadow[i]] = s1[i];
 
         if (s1[i] == '\0' || s2[i] == '\0')
             break;
@@ -252,10 +245,8 @@ void before_strncmp(const char *s1, const char *s2, size_t n) {
     tag_t *s2Shadow = addrToShadow(s2);
 
     for (unsigned i = 0; i < n; ++i) {
-        if (s1Shadow[i] > 0)
-            g_ident[s1Shadow[i]] = s2[i]; 
-        if (s2Shadow[i] > 0)
-            g_ident[s2Shadow[i]] = s1[i];
+        g_ident[s1Shadow[i]] = s2[i]; 
+        g_ident[s2Shadow[i]] = s1[i];
 
         if (s1[i] == '\0' || s2[i] == '\0')
             break;
@@ -452,7 +443,6 @@ static void handle_mov(INS ins) {
             IARG_END);
 }
 
-
 /* ---------- Move with zero extension handlers ---------- */
 #define GET_MOVZX_HANDLER(func, dst_size, src_size) \
     ((dst_size) == 2 && (src_size) == 1 ? (AFUNPTR)(func<2, 1>) : \
@@ -592,166 +582,107 @@ static void handle_cmp(INS ins) {
     }
 }
 
-/* Arithmetic handlers */
-// template<uint32_t N>
-// static void handle_arith_regtoreg(tag_t *dst, tag_t *src) {
-//     std::memcpy(dst, src, sizeof(tag_t) * N);
-//     if (N == 4)
-//         std::memset(dst + 4, 0, sizeof(tag_t) * N);
-// }
-
-static void handle_arith_regtoreg(unsigned N, uint32_t dst, uint32_t src, ADDRINT dst_val, ADDRINT src_val, uint32_t opcode) {
-    for (unsigned n = 0; n < N; ++n) {
-        if (g_regTags[dst + n]) {
-            g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)((src_val >> (n * 8)) & 0xFF)});
-            printf("[REGTOREG] DST Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
-        }
-
-        if (g_regTags[src + n]) {
-            g_taint_history[g_regTags[src + n] - 1].push_back({opcode, (uint8_t)((dst_val >> (n * 8)) & 0xFF)});
-            g_regTags[dst + n] = g_regTags[src + n];
-            printf("[REGTOREG] SRC Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
-        }
-    }
-
+/* ---------- Compare handlers ---------- */
+template<uint32_t N>
+static void handle_arith_regtoreg(tag_t *__restrict__ dst, tag_t *__restrict__ src) {
+    for (uint32_t n = 0; n < N; ++n)
+        dst[n] += src[n];
     if (N == 4)
-        for (unsigned n = 4; n < 8; ++n)
-            g_regTags[dst + n] = 0;
+        std::memset(dst + 4, 0, sizeof(tag_t) * 4);
 }
 
-static void handle_arith_memtoreg(unsigned N, uint32_t dst, char *addr, ADDRINT dst_val, uint32_t opcode) {
-    tag_t *shadow = addrToShadow(addr);
-
-    for (unsigned n = 0; n < N; ++n) {
-        if (g_regTags[dst + n]) {
-            g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)addr[n]});
-            printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
-        }
-
-        if (shadow[n]) {
-            g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((dst_val >> (n * 8)) & 0xFF)});
-            g_regTags[dst + n] = shadow[n];
-            printf("[MEMTOREG] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
-        }
-    }
-
+template<uint32_t N>
+static void handle_arith_memtoreg(tag_t *__restrict__ dst, char *__restrict__ src) {
+    tag_t *shadow = addrToShadow(src);
+    for (uint32_t n = 0; n < N; ++n)
+        dst[n] += shadow[n];
     if (N == 4)
-        for (unsigned n = 4; n < 8; ++n)
-            g_regTags[dst + n] = 0;
+        std::memset(dst + 4, 0, 4);
 }
 
-static void handle_arith_immtoreg(unsigned N, uint32_t dst, uint64_t imm, uint32_t opcode) {
-    for (unsigned n = 0; n < N; ++n) {
-        if (g_regTags[dst + n]) {
-            g_taint_history[g_regTags[dst + n] - 1].push_back({opcode, (uint8_t)((imm >> (n * 8)) & 0xFF)});
-            printf("[IMMTOREG] Byte found: %hu, Opcode: %u!\n", g_regTags[dst + n] - 1, opcode);
-        }
-    }
-
+template<uint32_t N>
+static void handle_arith_immtoreg(tag_t *__restrict__ dst) {
     if (N == 4)
-        for (unsigned n = 4; n < 8; ++n)
-            g_regTags[dst + n] = 0;
+        std::memset(dst + 4, 0, 4);
 }
 
-static void handle_arith_regtomem(unsigned N, char *addr, uint32_t src, ADDRINT src_val, uint32_t opcode) {
-    tag_t *shadow = addrToShadow(addr);
-
-    for (unsigned n = 0; n < N; ++n) {
-        if (shadow[n]) {
-            g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((src_val >> (n * 8)) & 0xFF)});
-            printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
-        }
-
-        if (g_regTags[src + n]) {
-            g_taint_history[g_regTags[src + n] - 1].push_back({opcode, (uint8_t)addr[n]});
-            shadow[n] = g_regTags[src + n];
-            printf("[REGTOMEM] Byte found: %hu, Opcode: %u!\n", g_regTags[src + n] - 1, opcode);
-        }
-    }
-}
-
-static void handle_arith_immtomem(unsigned N, char *addr, uint64_t imm, uint32_t opcode) {
-    tag_t *shadow = addrToShadow(addr);
-
-    for (unsigned n = 0; n < N; ++n) {
-        if (shadow[n]) {
-            g_taint_history[shadow[n] - 1].push_back({opcode, (uint8_t)((imm >> (n * 8)) & 0xFF)});
-            printf("[IMMTOMEM] Byte found: %hu, Opcode: %u!\n", shadow[n] - 1, opcode);
-        }
-    }
+template<uint32_t N>
+static void handle_arith_regtomem(char *__restrict__ dst, tag_t *__restrict__ src) {
+    tag_t *shadow = addrToShadow(dst);
+    for (uint32_t n = 0; n < N; ++n)
+        shadow[n] += src[n];
 }
 
 static void handle_arith(INS ins, uint32_t opcode) {
-    if (INS_OperandIsReg(ins, 0)) {
+    uint32_t size = INS_OperandWidth(ins, 0) / 8;
+
+    if (INS_OperandIsMemory(ins, 0)) {
         if (INS_OperandIsReg(ins, 1)) {
-            // AFUNPTR handler = GET_HANDLER(handle_arith_regtoreg, INS_OperandReg(ins, 0));
-            // if (!handler)
-            //     return;
-            //
-            // INS_InsertCall(ins, IPOINT_BEFORE,
-            //         handler,
-            //         IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
-            //         IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
-            //         IARG_END);
+            AFUNPTR handler = GET_HANDLER(handle_arith_regtomem, size);
+            if (!handler)
+                return;
 
             INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_arith_regtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
-                    IARG_UINT32, opcode,
-                    IARG_END);
-        } else if (INS_OperandIsMemory(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_arith_memtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_MEMORYREAD_EA,
-                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
-                    IARG_UINT32, opcode,
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_arith_immtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_UINT64, INS_OperandImmediate(ins, 1),
-                    IARG_UINT32, opcode,
+                    handler,
+                    IARG_MEMORYWRITE_EA,
+                    IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
                     IARG_END);
         }
-    } else if (INS_OperandIsMemory(ins, 0)) {
-        if (INS_OperandIsReg(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_arith_regtomem,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 1)),
-                    IARG_MEMORYWRITE_EA,
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
-                    IARG_UINT32, opcode,
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_arith_immtomem,
-                    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                    IARG_MEMORYWRITE_EA,
-                    IARG_UINT64, INS_OperandImmediate(ins, 1),
-                    IARG_UINT32, opcode,
-                    IARG_END);
-        }
+        return;
     }
+
+    if (INS_OperandIsMemory(ins, 1)) {
+        AFUNPTR handler = GET_HANDLER(handle_arith_memtoreg, size);
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_MEMORYREAD_EA,
+                IARG_END);
+        return;
+    }
+
+    if (INS_OperandIsImmediate(ins, 1) || (INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1))) {
+        AFUNPTR handler = GET_HANDLER(handle_arith_immtoreg, size);
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_END);
+        return;
+    }
+
+    AFUNPTR handler = GET_HANDLER(handle_arith_regtoreg, size);
+    if (!handler)
+        return;
+
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+            IARG_END);
 }
 
-// static void handle_xor(INS ins) {
-//     if (INS_OperandIsReg(ins, 0) && INS_OperandIsReg(ins, 1)
-//             && (INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1))) {
-//         uint32_t reg = getTaintReg(INS_OperandReg(ins, 0));
-//         AFUNPTR handler = NULL;
-//
-//         switch ()
-//     }
-// }
+static void handle_xor(INS ins) {
+    uint32_t size = INS_OperandWidth(ins, 0) / 8;
+
+    if (INS_OperandIsMemory(ins, 0)) {
+        return;
+    }
+
+    if (INS_OperandIsMemory(ins, 1)) {
+        return;
+    }
+
+    if (INS_OperandReg(ins, 0) == INS_OperandIsReg(ins, 1)) {
+        handle_clear(ins);
+        return;
+    }
+}
 
 static void handle_push(INS ins) {
     if (INS_OperandIsImmediate(ins, 0)) {
@@ -819,6 +750,8 @@ void Instrument(INS ins, void *) {
             handle_cmp(ins);
             break;
         case XED_ICLASS_XOR:
+            handle_xor(ins);
+            break;
         case XED_ICLASS_ADD:
         case XED_ICLASS_SUB:
         case XED_ICLASS_AND:
