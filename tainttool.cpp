@@ -8,7 +8,7 @@
 /* Undefine these to get some feedback about what your pintool is doing. */
 //#define PRINT_BASIC_BLOCKS /* show basic block addresses when instrumenting them */
 // #define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
-#define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
+// #define PRINT_UNHANDLED_INSTS /* print instructions which are not instrumented */
 
 KNOB<std::string> KnobInputFile(KNOB_MODE_WRITEONCE, "pintool", "i", "input.txt", "specify input file to be tainted");
 
@@ -187,7 +187,7 @@ inline unsigned getTaintReg(REG reg) {
 typedef uint16_t tag_t;
 
 /* Given an address, return the corresponding shadow memory (where we'll store the taint tags). */
-inline tag_t *addrToShadow(const void *addr) {
+__attribute__((always_inline)) inline tag_t *addrToShadow(const void *addr) {
 	return (tag_t *)((((uint64_t)(addr) + 0x200000000000ull) << 1) & 0x7fffffffffffull);
 }
 
@@ -206,7 +206,7 @@ void before_memset(char *dest, int c, size_t n) {
     tag_t *shadow = addrToShadow(dest);
 
     for (unsigned i = 0; i < n; ++i)
-        shadow[i] = g_regTags[REG_SIL];
+        shadow[i] = g_regTags[getTaintReg(REG_SIL)];
 }
 
 void before_memcpy(char *dest, const char *src, size_t n) {
@@ -261,19 +261,6 @@ void before_strncmp(const char *s1, const char *s2, size_t n) {
             break;
     }
 }
-
-// void before_strtol(const char *nptr) {
-//     tag_t *shadow = addrToShadow(nptr);
-//     unsigned i = 0;
-//
-//     // strtol parses until it hits a null terminator (or an invalid char for the base)
-//     while (nptr[i] != '\0') {
-//         if (shadow[i] > 0) {
-//             printf("[strtol] Tainted data found! Byte '%c' (Tag: %u) is being parsed.\n", nptr[i], shadow[i] - 1);
-//         }
-//         i++;
-//     }
-// }
 
 /* PIN calls this when a new image (binary/library) is loaded */
 void ImageLoad(IMG img, void *) {
@@ -350,164 +337,174 @@ void ImageLoad(IMG img, void *) {
                 IARG_END);
         RTN_Close(rtn);
     }
-	// rtn = RTN_FindByName(img, "strtol");
-	//    if (RTN_Valid(rtn)) {
-	//        RTN_Open(rtn);
-	//        RTN_InsertCall(rtn, IPOINT_BEFORE,
-	//                (AFUNPTR)before_strtol,
-	//                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-	//                IARG_END);
-	//        RTN_Close(rtn);
-	//    }
 }
 
-/* Clear handlers */
-static void handle_clear_mem(unsigned N, char *addr) {
-	tag_t *shadow = addrToShadow(addr);
 
-	for (unsigned n = 0; n < N; ++n)
-		shadow[n] = 0;
+/* ---------- Instruction handlers ---------- */
+#define GET_HANDLER(func, size) \
+    ((size) == 1 ? (AFUNPTR)(func<1>) : \
+     (size) == 2 ? (AFUNPTR)(func<2>) : \
+     (size) == 4 ? (AFUNPTR)(func<4>) : \
+     (size) == 8 ? (AFUNPTR)(func<8>) : NULL)
+
+/* ---------- Clear handlers ---------- */
+template<uint32_t N>
+static void handle_clear_reg(tag_t *dst) {
+    std::memset(dst, 0, sizeof(tag_t) * N);
+    if (N == 4)
+        std::memset(dst + 4, 0, sizeof(tag_t) * 4);
 }
 
-static void handle_clear_reg(unsigned N, unsigned reg) {
-	for (unsigned n = 0; n < N; ++n)
-		g_regTags[reg + n] = 0;
+template<uint32_t N>
+static void handle_clear_mem(char *dst) {
+    tag_t *shadow = addrToShadow(dst);
+    std::memset(shadow, 0, sizeof(tag_t) * N);
+}
 
+static void handle_clear(INS ins) {
+    if (INS_OperandIsReg(ins, 0)) {
+        AFUNPTR handler = GET_HANDLER(handle_clear_reg, getRegSize(INS_OperandReg(ins, 0)));
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_END);
+        return;
+    }
+
+    AFUNPTR handler = GET_HANDLER(handle_clear_mem, (INS_OperandWidth(ins, 0) / 8));
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_MEMORYWRITE_EA,
+            IARG_END);
+}
+
+/* ---------- Move handlers ---------- */
+template<uint32_t N>
+static void handle_mov_memtomem(char *dst, char *src) {
+	tag_t *shadowDst = addrToShadow(dst);
+	tag_t *shadowSrc = addrToShadow(src);
+    std::memcpy(shadowDst, shadowSrc, sizeof(tag_t) * N);
+}
+
+template<uint32_t N>
+static void handle_mov_memtoreg(tag_t *dst, char *src) {
+	tag_t *shadow = addrToShadow(src);
+    std::memcpy(dst, shadow, sizeof(tag_t) * N);
 	if (N == 4)
-		for (unsigned n = 4; n < 8; ++n)
-			g_regTags[reg + n] = 0;
+        std::memset(dst + 4, 0, sizeof(tag_t) * 4);
 }
 
-/* Move handlers */
-static void handle_mov_memtomem(unsigned N, char *to, char *from) {
-	tag_t *shadowTo = addrToShadow(to);
-	tag_t *shadowFrom = addrToShadow(from);
-
-	for (unsigned n = 0; n < N; ++n) {
-        // printf(" Byte found: %hu!\n", shadowFrom[n] - 1);
-        shadowTo[n] = shadowFrom[n];
-    }
+template<uint32_t N>
+static void handle_mov_regtomem(char *dst, tag_t *src) {
+	tag_t *shadow = addrToShadow(dst);
+    std::memcpy(shadow, src, sizeof(tag_t) * N);
 }
 
-static void handle_mov_memtoreg(unsigned N, char *addr, unsigned reg) {
-	tag_t *shadow = addrToShadow(addr);
-
-	for (unsigned n = 0; n < N; ++n) {
-        // printf(" Byte found: %hu!\n", shadow[n] - 1);
-		g_regTags[reg + n] = shadow[n];
-    }
-
-	/* 32-bit register write, clear upper 64 bits */
-	if (N == 4)
-		for (unsigned n = 4; n < 8; ++n)
-			g_regTags[reg + n] = 0;
-}
-
-static void handle_mov_regtomem(unsigned N, char *addr, uint64_t reg) {
-	tag_t *shadow = addrToShadow(addr);
-
-	for (unsigned n = 0; n < N; ++n) {
-        // printf(" Byte found: %hu!\n", g_regTags[reg + n] - 1);
-        shadow[n] = g_regTags[reg + n];
-    }
-}
-
-static void handle_mov_regtoreg(unsigned N, uint64_t to, uint64_t from) {
-	for (unsigned n = 0; n < N; ++n) {
-        // printf(" Byte found: %hu!\n", g_regTags[from + n] - 1);
-		g_regTags[to + n] = g_regTags[from + n];
-    }
-
-	/* 32-bit register write, clear upper 64 bits */
-	if (N == 4)
-		for (unsigned n = 4; n < 8; ++n)
-			g_regTags[to + n] = 0;
+template<uint32_t N>
+static void handle_mov_regtoreg(tag_t *dst, tag_t *src) {
+    std::memcpy(dst, src, sizeof(tag_t) * N);
+    if (N == 4)
+        std::memset(dst + 4, 0, sizeof(tag_t) * 4);
 }
 
 static void handle_mov(INS ins) {
-    if (INS_OperandIsMemory(ins, 1)) {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_mov_memtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_MEMORYREAD_EA,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_END);
-    } else if (INS_OperandIsImmediate(ins, 1)) {
-        if (INS_OperandIsMemory(ins, 0)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_clear_mem,
-                    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                    IARG_MEMORYWRITE_EA,
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_clear_reg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_END);
-        }
-    } else if (INS_OperandIsMemory(ins, 0)) {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_mov_regtomem,
-                IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                IARG_MEMORYWRITE_EA,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                IARG_END);
-    } else {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_mov_regtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                IARG_END);
+    if (INS_OperandIsImmediate(ins, 1)) {
+        handle_clear(ins);
+        return;
     }
+
+    if (INS_OperandIsMemory(ins, 1)) {
+        AFUNPTR handler = GET_HANDLER(handle_mov_memtoreg, INS_OperandWidth(ins, 1) / 8);
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_MEMORYREAD_EA,
+                IARG_END);
+        return;
+    }
+
+    uint32_t size = getRegSize(INS_OperandReg(ins, 1));
+
+    if (INS_OperandIsMemory(ins, 0)) {
+        AFUNPTR handler = GET_HANDLER(handle_mov_regtomem, size);
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_MEMORYWRITE_EA,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+                IARG_END);
+        return;
+    }
+
+    AFUNPTR handler = GET_HANDLER(handle_mov_regtoreg, size);
+    if (!handler)
+        return;
+
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+            IARG_END);
 }
 
-static void handle_movzx_memtoreg(unsigned N, char *addr, uint64_t reg, uint32_t srcbytes) {
-	tag_t *shadow = addrToShadow(addr);
 
-	for (unsigned n = 0; n < srcbytes; ++n)
-		g_regTags[reg + n] = shadow[n];
-	for (unsigned n = srcbytes; n < N; ++n)
-		g_regTags[reg + n] = 0;
+/* ---------- Move with zero extension handlers ---------- */
+#define GET_MOVZX_HANDLER(func, dst_size, src_size) \
+    ((dst_size) == 2 && (src_size) == 1 ? (AFUNPTR)(func<2, 1>) : \
+     (dst_size) == 4 && (src_size) == 1 ? (AFUNPTR)(func<4, 1>) : \
+     (dst_size) == 4 && (src_size) == 2 ? (AFUNPTR)(func<4, 2>) : \
+     (dst_size) == 8 && (src_size) == 1 ? (AFUNPTR)(func<8, 1>) : \
+     (dst_size) == 8 && (src_size) == 2 ? (AFUNPTR)(func<8, 2>) : NULL);
 
-	/* 32-bit register write, clear upper 64 bits */
-	if (N == 4)
-		for (unsigned n = 4; n < 8; ++n)
-			g_regTags[reg + n] = 0;
+template <uint32_t DST_N, uint32_t SRC_N>
+static void handle_movzx_regtoreg(tag_t *dst, tag_t *src) {
+    for (uint32_t n = 0; n < SRC_N; n++)
+        dst[n] = src[n];
+    for (uint32_t n = SRC_N; n < DST_N; n++)
+        dst[n] = 0;
 }
 
-static void handle_movzx_regtoreg(unsigned N, uint64_t to, uint64_t from, uint32_t srcbytes) {
-	for (unsigned n = 0; n < srcbytes; ++n)
-		g_regTags[to + n] = g_regTags[from + n];
-	for (unsigned n = srcbytes; n < N; ++n)
-		g_regTags[to + n] = 0;
-
-	/* 32-bit register write, clear upper 64 bits */
-	if (N == 4)
-		for (unsigned n = 4; n < 8; ++n)
-			g_regTags[to + n] = 0;
+template <uint32_t DST_N, uint32_t SRC_N>
+static void handle_movzx_memtoreg(tag_t *dst, char *src) {
+    tag_t *shadow = addrToShadow(src);
+    for (uint32_t n = 0; n < SRC_N; n++)
+        dst[n] = shadow[n];
+    for (uint32_t n = SRC_N; n < DST_N; n++)
+        dst[n] = 0;
 }
 
 static void handle_movzx(INS ins) {
-    if (INS_OperandIsMemory(ins, 1)) {
+    uint32_t dst_size = getRegSize(INS_OperandReg(ins, 0));
+
+    if (INS_OperandIsReg(ins, 1)) {
+        AFUNPTR handler = GET_MOVZX_HANDLER(handle_movzx_regtoreg, dst_size, getRegSize(INS_OperandReg(ins, 1)));
+        if (!handler)
+            return;
+
         INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_movzx_memtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_MEMORYREAD_EA,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_UINT32, INS_OperandWidth(ins, 1)/8,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
                 IARG_END);
-    } else {
-        INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_movzx_regtoreg,
-                IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                IARG_UINT32, INS_OperandWidth(ins, 1)/8,
-                IARG_END);
+        return;
     }
+
+    AFUNPTR handler = GET_MOVZX_HANDLER(handle_movzx_memtoreg, dst_size, getRegSize(INS_OperandReg(ins, 1)));
+    if (!handler)
+        return;
+
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+            IARG_MEMORYREAD_EA,
+            IARG_END);
 }
+
 static uint8_t compute_val(uint8_t val, tag_t tag) {
     // uint8_t result = val;
 
@@ -630,6 +627,13 @@ static void handle_cmp(INS ins) {
 }
 
 /* Arithmetic handlers */
+// template<uint32_t N>
+// static void handle_arith_regtoreg(tag_t *dst, tag_t *src) {
+//     std::memcpy(dst, src, sizeof(tag_t) * N);
+//     if (N == 4)
+//         std::memset(dst + 4, 0, sizeof(tag_t) * N);
+// }
+
 static void handle_arith_regtoreg(unsigned N, uint32_t dst, uint32_t src, ADDRINT dst_val, ADDRINT src_val, uint32_t opcode) {
     for (unsigned n = 0; n < N; ++n) {
         if (g_regTags[dst + n]) {
@@ -714,6 +718,16 @@ static void handle_arith_immtomem(unsigned N, char *addr, uint64_t imm, uint32_t
 static void handle_arith(INS ins, uint32_t opcode) {
     if (INS_OperandIsReg(ins, 0)) {
         if (INS_OperandIsReg(ins, 1)) {
+            // AFUNPTR handler = GET_HANDLER(handle_arith_regtoreg, INS_OperandReg(ins, 0));
+            // if (!handler)
+            //     return;
+            //
+            // INS_InsertCall(ins, IPOINT_BEFORE,
+            //         handler,
+            //         IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+            //         IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+            //         IARG_END);
+
             INS_InsertCall(ins, IPOINT_BEFORE,
                     (AFUNPTR)handle_arith_regtoreg,
                     IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
@@ -763,49 +777,66 @@ static void handle_arith(INS ins, uint32_t opcode) {
     }
 }
 
-/* Shift operation handles */
-static void handle_shl_reg(uint32_t dest) {
-    g_regTags[dest + 3] = g_regTags[dest + 1];
-    g_regTags[dest + 2] = g_regTags[dest + 0];
+// static void handle_xor(INS ins) {
+//     if (INS_OperandIsReg(ins, 0) && INS_OperandIsReg(ins, 1)
+//             && (INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1))) {
+//         uint32_t reg = getTaintReg(INS_OperandReg(ins, 0));
+//         AFUNPTR handler = NULL;
+//
+//         switch ()
+//     }
+// }
 
-    g_regTags[dest + 1] = 0;
-    g_regTags[dest + 0] = 0;
-
-    g_regTags[dest + 4] = 0;
-    g_regTags[dest + 5] = 0;
-    g_regTags[dest + 6] = 0;
-    g_regTags[dest + 7] = 0;
-}
-
-static void handle_shl(INS ins) {
-    if (INS_OperandIsReg(ins, 1)) {
+static void handle_push(INS ins) {
+    if (INS_OperandIsImmediate(ins, 0)) {
         INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_shl_reg,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                (AFUNPTR)handle_clear_mem<8>,
+                IARG_MEMORYWRITE_EA,
                 IARG_END);
+        return;
     }
-}
 
-static void handle_shr_reg(uint32_t dest) {
-    g_regTags[dest + 0] = g_regTags[dest + 2];
-    g_regTags[dest + 1] = g_regTags[dest + 3];
+    if (INS_OperandIsReg(ins, 0)) {
+        AFUNPTR handler = GET_HANDLER(handle_mov_regtomem, getRegSize(INS_OperandReg(ins, 0)));
+        if (!handler)
+            return;
 
-    g_regTags[dest + 2] = 0;
-    g_regTags[dest + 3] = 0;
-
-    g_regTags[dest + 4] = 0;
-    g_regTags[dest + 5] = 0;
-    g_regTags[dest + 6] = 0;
-    g_regTags[dest + 7] = 0;
-}
-
-static void handle_shr(INS ins) {
-    if (INS_OperandIsReg(ins, 1)) {
         INS_InsertCall(ins, IPOINT_BEFORE,
-                (AFUNPTR)handle_shr_reg,
-                IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
+                handler,
+                IARG_MEMORYWRITE_EA,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
                 IARG_END);
+        return;
     }
+
+    AFUNPTR handler = GET_HANDLER(handle_mov_memtomem, INS_OperandWidth(ins, 0) / 8);
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_MEMORYWRITE_EA,
+            IARG_MEMORYREAD_EA,
+            IARG_END);
+}
+
+static void handle_pop(INS ins) {
+    if (INS_OperandIsReg(ins, 0)) {
+        AFUNPTR handler = GET_HANDLER(handle_mov_memtoreg, getRegSize(INS_OperandReg(ins, 0)));
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_MEMORYREAD_EA,
+                IARG_END);
+        return;
+    }
+
+    AFUNPTR handler = GET_HANDLER(handle_mov_memtomem, INS_OperandWidth(ins, 0) / 8);
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_MEMORYWRITE_EA,
+            IARG_MEMORYREAD_EA,
+            IARG_END);
 }
 
 /* PIN calls this while translating an instruction */
@@ -820,31 +851,18 @@ void Instrument(INS ins, void *) {
 	case XED_ICLASS_CMP:
     case XED_ICLASS_TEST:
         handle_cmp(ins);
-		break;
-	case XED_ICLASS_SHL:
-	       handle_shl(ins);
-	       break;
-	case XED_ICLASS_SHR:
-	       handle_shr(ins);
-	       break;
-	case XED_ICLASS_ADD:
+        break;
+    case XED_ICLASS_XOR:
+    case XED_ICLASS_ADD:
 	case XED_ICLASS_SUB:
-	case XED_ICLASS_SBB:
-	case XED_ICLASS_ROR:
-	case XED_ICLASS_XOR:
 	case XED_ICLASS_AND:
 	case XED_ICLASS_OR:
         if (ins_opcode == XED_ICLASS_XOR &&
             INS_OperandIsReg(ins, 0) && 
             INS_OperandIsReg(ins, 1) && 
             INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
-
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_clear_reg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_END);
-            break;
+            
+            handle_clear(ins);
         }
         handle_arith(ins, ins_opcode);
 		break;
@@ -886,60 +904,13 @@ void Instrument(INS ins, void *) {
 	case XED_ICLASS_BSWAP:
 	case XED_ICLASS_LEA:
 		// This just clears taint on the target, which should suffice for BAMA.
-		if (INS_OperandIsReg(ins, 0)) {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-					(AFUNPTR)handle_clear_reg,
-					IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-					IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-					IARG_END);
-		} else {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-					(AFUNPTR)handle_clear_mem,
-					IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-					IARG_MEMORYWRITE_EA,
-					IARG_END);
-		}
+        handle_clear(ins);
 		break;
 	case XED_ICLASS_PUSH:
-		/* We implemented PUSH/POP for you. */
-		if (INS_OperandIsReg(ins, 0)) {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-				(AFUNPTR)handle_mov_regtomem,
-				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-				IARG_MEMORYWRITE_EA,
-				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-				IARG_END);
-		} else if (INS_OperandIsMemory(ins, 0)) {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-				(AFUNPTR)handle_mov_memtomem,
-				IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-				IARG_MEMORYWRITE_EA,
-				IARG_MEMORYREAD_EA,
-				IARG_END);
-		} else {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-				(AFUNPTR)handle_clear_mem,
-				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-				IARG_MEMORYWRITE_EA,
-				IARG_END);
-		}
-		break;
+        handle_push(ins);
+        break;
 	case XED_ICLASS_POP:
-		if (INS_OperandIsReg(ins, 0)) {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-				(AFUNPTR)handle_mov_memtoreg,
-				IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-				IARG_MEMORYREAD_EA,
-				IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-				IARG_END);
-		} else {
-			INS_InsertCall(ins, IPOINT_BEFORE,
-				(AFUNPTR)handle_mov_memtomem,
-				IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-				IARG_MEMORYWRITE_EA,
-				IARG_MEMORYREAD_EA,
-				IARG_END);
-		}
+        handle_pop(ins);
 		break;
 	default:
 #ifdef PRINT_UNHANDLED_INSTS

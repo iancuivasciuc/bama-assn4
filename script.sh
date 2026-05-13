@@ -7,5 +7,5 @@ make clean
 make
 
 printf "%4096s" | tr ' ' 'X' > init.txt
-pin -t obj-intel64/tainttool.so -i init.txt -- ./NLQBox -i init.txt
+pin -log_inline -t obj-intel64/tainttool.so -i init.txt -- ./NLQBox -i init.txt
 
