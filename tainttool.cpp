@@ -182,7 +182,7 @@ inline unsigned getTaintReg(REG reg) {
 	}
 }
 
-#define IDENTITY_FILE_SIZE 4096
+#define IDENTITY_FILE_SIZE 4097
 
 typedef uint16_t tag_t;
 
@@ -223,9 +223,9 @@ void before_memcmp(const char *s1, const char *s2, size_t n) {
 
     for (unsigned i = 0; i < n; ++i) {
         if (s1Shadow[i] > 0)
-            g_ident[s1Shadow[i] - 1] = s2[i]; 
+            g_ident[s1Shadow[i]] = s2[i]; 
         if (s2Shadow[i] > 0)
-            g_ident[s2Shadow[i] - 1] = s1[i];
+            g_ident[s2Shadow[i]] = s1[i];
     }
 }
 
@@ -236,9 +236,9 @@ void before_strcmp(const char *s1, const char *s2) {
     unsigned i = 0;
     for (;;) {
         if (s1Shadow[i] > 0)
-            g_ident[s1Shadow[i] - 1] = s2[i]; 
+            g_ident[s1Shadow[i]] = s2[i]; 
         if (s2Shadow[i] > 0)
-            g_ident[s2Shadow[i] - 1] = s1[i];
+            g_ident[s2Shadow[i]] = s1[i];
 
         if (s1[i] == '\0' || s2[i] == '\0')
             break;
@@ -253,9 +253,9 @@ void before_strncmp(const char *s1, const char *s2, size_t n) {
 
     for (unsigned i = 0; i < n; ++i) {
         if (s1Shadow[i] > 0)
-            g_ident[s1Shadow[i] - 1] = s2[i]; 
+            g_ident[s1Shadow[i]] = s2[i]; 
         if (s2Shadow[i] > 0)
-            g_ident[s2Shadow[i] - 1] = s1[i];
+            g_ident[s2Shadow[i]] = s1[i];
 
         if (s1[i] == '\0' || s2[i] == '\0')
             break;
@@ -264,79 +264,79 @@ void before_strncmp(const char *s1, const char *s2, size_t n) {
 
 /* PIN calls this when a new image (binary/library) is loaded */
 void ImageLoad(IMG img, void *) {
-    if (!IMG_IsMainExecutable(img))
-        return;
+	if (!IMG_IsMainExecutable(img))
+	       return;
 
-    RTN rtn = RTN_FindByName(img, "memset");
-    if (RTN_Valid(rtn)) {
-        RTN_Open(rtn);
-        RTN_InsertCall(rtn, IPOINT_BEFORE,
-                (AFUNPTR)before_memset,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
-                IARG_END);
-        RTN_Close(rtn);
-    }
+	RTN rtn = RTN_FindByName(img, "memset");
+	if (RTN_Valid(rtn)) {
+	    RTN_Open(rtn);
+	    RTN_InsertCall(rtn, IPOINT_BEFORE,
+	            (AFUNPTR)before_memset,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+	            IARG_END);
+	    RTN_Close(rtn);
+	}
 
 	rtn = RTN_FindByName(img, "__memset_chk");
-    if (RTN_Valid(rtn)) {
-        RTN_Open(rtn);
-        RTN_InsertCall(rtn, IPOINT_BEFORE,
-                (AFUNPTR)before_memset,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
-                IARG_END);
-        RTN_Close(rtn);
-    }
+	   if (RTN_Valid(rtn)) {
+	       RTN_Open(rtn);
+	       RTN_InsertCall(rtn, IPOINT_BEFORE,
+	               (AFUNPTR)before_memset,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+	               IARG_END);
+	       RTN_Close(rtn);
+	   }
 
 	rtn = RTN_FindByName(img, "memcpy");
-    if (RTN_Valid(rtn)) {
-        RTN_Open(rtn);
-        RTN_InsertCall(rtn, IPOINT_BEFORE,
-                (AFUNPTR)before_memcpy,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
-                IARG_END);
-        RTN_Close(rtn);
-    }
+	   if (RTN_Valid(rtn)) {
+	       RTN_Open(rtn);
+	       RTN_InsertCall(rtn, IPOINT_BEFORE,
+	               (AFUNPTR)before_memcpy,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+	               IARG_END);
+	       RTN_Close(rtn);
+	   }
 
 	rtn = RTN_FindByName(img, "memcmp");
-    if (RTN_Valid(rtn)) {
-        RTN_Open(rtn);
-        RTN_InsertCall(rtn, IPOINT_BEFORE,
-                (AFUNPTR)before_memcmp,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
-                IARG_END);
-        RTN_Close(rtn);
-    }
+	   if (RTN_Valid(rtn)) {
+	       RTN_Open(rtn);
+	       RTN_InsertCall(rtn, IPOINT_BEFORE,
+	               (AFUNPTR)before_memcmp,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+	               IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+	               IARG_END);
+	       RTN_Close(rtn);
+	   }
 
 	rtn = RTN_FindByName(img, "strcmp");
-    if (RTN_Valid(rtn)) {
-        RTN_Open(rtn);
-        RTN_InsertCall(rtn, IPOINT_BEFORE,
-                (AFUNPTR)before_strcmp,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                IARG_END);
-        RTN_Close(rtn);
-    }
+	if (RTN_Valid(rtn)) {
+	    RTN_Open(rtn);
+	    RTN_InsertCall(rtn, IPOINT_BEFORE,
+	            (AFUNPTR)before_strcmp,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+	            IARG_END);
+	    RTN_Close(rtn);
+	}
 
 	rtn = RTN_FindByName(img, "strncmp");
-    if (RTN_Valid(rtn)) {
-        RTN_Open(rtn);
-        RTN_InsertCall(rtn, IPOINT_BEFORE,
-                (AFUNPTR)before_strncmp,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
-                IARG_END);
-        RTN_Close(rtn);
-    }
+	if (RTN_Valid(rtn)) {
+	    RTN_Open(rtn);
+	    RTN_InsertCall(rtn, IPOINT_BEFORE,
+	            (AFUNPTR)before_strncmp,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+	            IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+	            IARG_END);
+	    RTN_Close(rtn);
+	}
 }
 
 
@@ -505,124 +505,90 @@ static void handle_movzx(INS ins) {
             IARG_END);
 }
 
-static uint8_t compute_val(uint8_t val, tag_t tag) {
-    // uint8_t result = val;
-
-    if (!g_taint_history[tag].empty()) {
-        // printf("--- For Byte: %u ---\n", tag);
-
-        for (auto it : g_taint_history[tag]) {
-            uint32_t opcode = it.opcode;
-            uint8_t op_val  = it.value;
-
-            if (opcode == 10) {
-                // printf("\tADD %hhu\n", op_val);
-            } else if (opcode == 908) {
-                // printf("\tSUB %hhu\n", op_val);
-            } else if (opcode == 1838) {
-                return val ^ op_val;
-                // printf("\tXOR %hhu\n", op_val);
-            } else if (opcode == 565) {
-                // printf("\tOR %hhu\n", op_val);
-            } else {
-                // printf("\tUnknown!\n");
-            }
-        }
-    }
-
-    return val; 
+/* ---------- Compare handlers ---------- */
+static void handle_cmp_regtoreg(tag_t *__restrict__ tag1, tag_t *__restrict__ tag2, ADDRINT val1, ADDRINT val2, uint32_t shift) {
+    g_ident[*tag1] = (val2 >> shift) & 0xFF;
+    g_ident[*tag2] = (val1 >> shift) & 0xFF;
 }
 
-/* Compare handlers */
-static void handle_cmp_regtoreg(unsigned N, uint32_t reg1, uint32_t reg2, ADDRINT val1, ADDRINT val2) {
-    for (unsigned n = 0; n < N; ++n) {
-        tag_t tag1 = g_regTags[reg1 + n];
-        tag_t tag2 = g_regTags[reg2 + n];
-
-        if (tag1)
-            g_ident[tag1 - 1] = compute_val((val2 >> (n * 8)) & 0xFF, tag1 - 1);
-
-        if (tag2)
-            g_ident[tag2 - 1] = compute_val((val1 >> (n * 8)) & 0xFF, tag2 - 1);
-    }
-}
-
-static void handle_cmp_memtoreg(unsigned N, uint32_t reg, char *addr, ADDRINT reg_val) {
+static void handle_cmp_memtoreg(tag_t *__restrict__ tag, char *__restrict__ addr, ADDRINT reg_val, uint32_t shift) {
     tag_t *shadow = addrToShadow(addr);
-
-    for (unsigned n = 0; n < N; ++n) {
-        tag_t tag = g_regTags[reg + n];
-
-        if (tag)
-            g_ident[tag - 1] = compute_val(addr[n], tag - 1);
-
-        if (shadow[n])
-            g_ident[shadow[n] - 1] = compute_val((reg_val >> (n * 8)) & 0xFF, shadow[n] - 1);
-    }
+    g_ident[*tag] = addr[shift / 8];
+    g_ident[shadow[shift / 8]] = (reg_val >> shift) & 0xFF;
 }
 
-static void handle_cmp_immtoreg(unsigned N, uint32_t reg, uint64_t imm) {
-    for (unsigned n = 0; n < N; ++n) {
-        tag_t tag = g_regTags[reg + n];
-
-        if (tag)
-            g_ident[tag - 1] = compute_val((imm >> (n * 8)) & 0xFF, tag - 1);
-    }
+static void handle_cmp_immtoreg(tag_t *tag, uint8_t imm) {
+    g_ident[*tag] = imm;
 }
 
-static void handle_cmp_immtomem(unsigned N, char *addr, uint64_t imm) {
+static void handle_cmp_immtomem(char *addr, uint8_t imm, uint32_t shift) {
     tag_t *shadow = addrToShadow(addr);
-
-    for (unsigned n = 0; n < N; ++n) {
-        if (shadow[n])
-            g_ident[shadow[n] - 1] = compute_val((imm >> (n * 8)) & 0xFF, shadow[n] - 1);
-    }
+    g_ident[shadow[shift / 8]] = imm;
 }
 
 static void handle_cmp(INS ins) {
     if (INS_OperandIsReg(ins, 0)) {
+        uint32_t size = getRegSize(INS_OperandReg(ins, 0));
+
         if (INS_OperandIsReg(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_regtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
-                    IARG_REG_VALUE, INS_OperandReg(ins, 1),
-                    IARG_END);
-        } else if (INS_OperandIsMemory(ins, 1)) {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_memtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_MEMORYREAD_EA,
-                    IARG_REG_VALUE, INS_OperandReg(ins, 0),
-                    IARG_END);
-        } else {
+            for (uint32_t n = 0; n < size; n++) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_regtoreg,
+                        IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                        IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+                        IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                        IARG_REG_VALUE, INS_OperandReg(ins, 1),
+                        IARG_UINT32, n * 8,
+                        IARG_END);
+            }
+            return;
+        }
+
+        if (INS_OperandIsMemory(ins, 1)) {
+            for (uint32_t n = 0; n < size; n++) {
+                INS_InsertCall(ins, IPOINT_BEFORE,
+                        (AFUNPTR)handle_cmp_memtoreg,
+                        IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                        IARG_MEMORYREAD_EA,
+                        IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                        IARG_UINT32, n * 8,
+                        IARG_END);
+            }
+            return;
+        }
+
+        for (uint32_t n = 0; n < size; n++) {
             INS_InsertCall(ins, IPOINT_BEFORE,
                     (AFUNPTR)handle_cmp_immtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 0)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 0)),
-                    IARG_UINT64, INS_OperandImmediate(ins, 1),
+                    IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                    IARG_UINT32, (INS_OperandImmediate(ins, 1) >> (n * 8)) & 0xFF,
                     IARG_END);
+            return;
         }
-    } else {
-        if (INS_OperandIsReg(ins, 1)) {
+    }
+
+    uint32_t size = INS_OperandWidth(ins, 0) / 8;
+
+    if (INS_OperandIsReg(ins, 1)) {
+        for (uint32_t n = 0; n < size; n++) {
             INS_InsertCall(ins, IPOINT_BEFORE,
                     (AFUNPTR)handle_cmp_memtoreg,
-                    IARG_UINT32, getRegSize(INS_OperandReg(ins, 1)),
-                    IARG_UINT32, getTaintReg(INS_OperandReg(ins, 1)),
+                    IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
                     IARG_MEMORYREAD_EA,
                     IARG_REG_VALUE, INS_OperandReg(ins, 1),
-                    IARG_END);
-        } else {
-            INS_InsertCall(ins, IPOINT_BEFORE,
-                    (AFUNPTR)handle_cmp_immtomem,
-                    IARG_UINT32, INS_OperandWidth(ins, 0)/8,
-                    IARG_UINT64, INS_OperandImmediate(ins, 1),
-                    IARG_MEMORYREAD_EA,
+                    IARG_UINT32, n * 8,
                     IARG_END);
         }
+        return;
+    }
+
+    for (uint32_t n = 0; n < size; n++) {
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                (AFUNPTR)handle_cmp_immtomem,
+                IARG_MEMORYREAD_EA,
+                IARG_UINT32, (INS_OperandImmediate(ins, 1) >> (n * 8)) & 0xFF,
+                IARG_UINT32, n * 8,
+                IARG_END);
     }
 }
 
@@ -847,77 +813,77 @@ void Instrument(INS ins, void *) {
 	printf("instrumenting@%p: %s\n", (void *)INS_Address(ins), INS_Disassemble(ins).c_str());
 #endif
 
-	switch (ins_opcode) {
-	case XED_ICLASS_CMP:
-    case XED_ICLASS_TEST:
-        handle_cmp(ins);
-        break;
-    case XED_ICLASS_XOR:
-    case XED_ICLASS_ADD:
-	case XED_ICLASS_SUB:
-	case XED_ICLASS_AND:
-	case XED_ICLASS_OR:
-        if (ins_opcode == XED_ICLASS_XOR &&
-            INS_OperandIsReg(ins, 0) && 
-            INS_OperandIsReg(ins, 1) && 
-            INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
-            
+    switch (ins_opcode) {
+        case XED_ICLASS_CMP:
+        case XED_ICLASS_TEST:
+            handle_cmp(ins);
+            break;
+        case XED_ICLASS_XOR:
+        case XED_ICLASS_ADD:
+        case XED_ICLASS_SUB:
+        case XED_ICLASS_AND:
+        case XED_ICLASS_OR:
+            if (ins_opcode == XED_ICLASS_XOR &&
+                    INS_OperandIsReg(ins, 0) && 
+                    INS_OperandIsReg(ins, 1) && 
+                    INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
+
+                handle_clear(ins);
+            }
+            handle_arith(ins, ins_opcode);
+            break;
+        case XED_ICLASS_MOV:
+            /* We implemented MOV for you (except one bit in a helper function, above, for you to fill in). */
+            handle_mov(ins);
+            break;
+        case XED_ICLASS_MOVSX:
+        case XED_ICLASS_MOVSXD:
+            /*
+             * We implement MOVSX/MOVSXD the same as MOVZX (clearing taint).
+             * This is incorrect but should be enough for this assignment.
+             */
+        case XED_ICLASS_MOVZX:
+            handle_movzx(ins);
+            break;
+        case XED_ICLASS_MOVBE:
+        case XED_ICLASS_MOVQ:
+        case XED_ICLASS_MOVD:
+        case XED_ICLASS_VMOVQ:
+        case XED_ICLASS_VMOVD:
+        case XED_ICLASS_VMOVAPD:
+        case XED_ICLASS_MOVSD:
+        case XED_ICLASS_MOVSD_XMM:
+        case XED_ICLASS_VMOVSD:
+        case XED_ICLASS_MOVDQU:
+        case XED_ICLASS_MOVDQA:
+        case XED_ICLASS_VMOVDQU:
+        case XED_ICLASS_VMOVDQA:
+        case XED_ICLASS_MOVUPS:
+        case XED_ICLASS_MOVAPS:
+        case XED_ICLASS_MOVAPD:
+        case XED_ICLASS_VMOVAPS:
+        case XED_ICLASS_MOVLPD:
+        case XED_ICLASS_MOVHPD:
+        case XED_ICLASS_MOVLPS:
+        case XED_ICLASS_MOVHPS:
+        case XED_ICLASS_XCHG:
+        case XED_ICLASS_BSWAP:
+        case XED_ICLASS_LEA:
+            // This just clears taint on the target, which should suffice for BAMA.
             handle_clear(ins);
-        }
-        handle_arith(ins, ins_opcode);
-		break;
-	case XED_ICLASS_MOV:
-		/* We implemented MOV for you (except one bit in a helper function, above, for you to fill in). */
-        handle_mov(ins);
-		break;
-	case XED_ICLASS_MOVSX:
-	case XED_ICLASS_MOVSXD:
-		/*
-		 * We implement MOVSX/MOVSXD the same as MOVZX (clearing taint).
-		 * This is incorrect but should be enough for this assignment.
-		 */
-	case XED_ICLASS_MOVZX:
-        handle_movzx(ins);
-		break;
-	case XED_ICLASS_MOVBE:
-	case XED_ICLASS_MOVQ:
-	case XED_ICLASS_MOVD:
-	case XED_ICLASS_VMOVQ:
-	case XED_ICLASS_VMOVD:
-	case XED_ICLASS_VMOVAPD:
-	case XED_ICLASS_MOVSD:
-	case XED_ICLASS_MOVSD_XMM:
-	case XED_ICLASS_VMOVSD:
-	case XED_ICLASS_MOVDQU:
-	case XED_ICLASS_MOVDQA:
-	case XED_ICLASS_VMOVDQU:
-	case XED_ICLASS_VMOVDQA:
-	case XED_ICLASS_MOVUPS:
-	case XED_ICLASS_MOVAPS:
-	case XED_ICLASS_MOVAPD:
-	case XED_ICLASS_VMOVAPS:
-	case XED_ICLASS_MOVLPD:
-	case XED_ICLASS_MOVHPD:
-	case XED_ICLASS_MOVLPS:
-	case XED_ICLASS_MOVHPS:
-	case XED_ICLASS_XCHG:
-	case XED_ICLASS_BSWAP:
-	case XED_ICLASS_LEA:
-		// This just clears taint on the target, which should suffice for BAMA.
-        handle_clear(ins);
-		break;
-	case XED_ICLASS_PUSH:
-        handle_push(ins);
-        break;
-	case XED_ICLASS_POP:
-        handle_pop(ins);
-		break;
-	default:
+            break;
+        case XED_ICLASS_PUSH:
+            handle_push(ins);
+            break;
+        case XED_ICLASS_POP:
+            handle_pop(ins);
+            break;
+        default:
 #ifdef PRINT_UNHANDLED_INSTS
-		printf("unhandled @%p: %s\n", (void *)INS_Address(ins), INS_Disassemble(ins).c_str());
+            printf("unhandled @%p: %s\n", (void *)INS_Address(ins), INS_Disassemble(ins).c_str());
 #endif
-		break;
-	}
+            break;
+    }
 }
 
 std::map<int, std::string> g_open_fds;
@@ -949,7 +915,7 @@ void read_hook(int fd, char *buf, size_t count) {
 		*(addrToShadow(buf + n)) = pos + n + 1;
 
         /* Copy the initial identity file to g_ident. */
-        g_ident[n] = buf[n];
+        g_ident[n + 1] = buf[n];
 	}
 }
 
@@ -1010,11 +976,11 @@ void Trace(TRACE trace, void *) {
 
 void Fini(INT32 code, void *) {
     std::ofstream out("out.txt", std::ios::binary);
-    out.write((const char*)g_ident, IDENTITY_FILE_SIZE);
+    out.write((const char*)&g_ident[1], IDENTITY_FILE_SIZE);
     out.close();
 
     int count = 0;
-    for (unsigned n = 0; n < IDENTITY_FILE_SIZE; ++n) {
+    for (unsigned n = 1; n < IDENTITY_FILE_SIZE; ++n) {
         if (g_ident[n] != 'X') {
             count++;
         }
