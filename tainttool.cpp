@@ -4,7 +4,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <fstream>
-#include <vector>
+
 /* Undefine these to get some feedback about what your pintool is doing. */
 //#define PRINT_BASIC_BLOCKS /* show basic block addresses when instrumenting them */
 // #define PRINT_ALL_INSTS /* print each instruction before instrumenting it*/
@@ -193,13 +193,7 @@ __attribute__((always_inline)) inline tag_t *addrToShadow(const void *addr) {
 
 tag_t g_regTags[TREG_END];
 char g_ident[IDENTITY_FILE_SIZE];
-
-// struct TaintOp {
-//     uint32_t opcode;
-//     uint8_t value;
-// };
-//
-// std::vector<TaintOp> g_taint_history[IDENTITY_FILE_SIZE];
+char g_xor[IDENTITY_FILE_SIZE] = {};
 
 /* Standard library hooks */
 void before_memset(char *dest, int c, size_t n) {
@@ -219,8 +213,8 @@ void before_memcmp(const char *s1, const char *s2, size_t n) {
     tag_t *s1Shadow = addrToShadow(s1);
     tag_t *s2Shadow = addrToShadow(s2);
     for (unsigned i = 0; i < n; ++i) {
-        g_ident[s1Shadow[i]] = s2[i]; 
-        g_ident[s2Shadow[i]] = s1[i];
+        g_ident[s1Shadow[i]] = s2[i] ^ g_xor[s1Shadow[i]]; 
+        g_ident[s2Shadow[i]] = s1[i] ^ g_xor[s2Shadow[i]];
     }
 }
 
@@ -230,8 +224,8 @@ void before_strcmp(const char *s1, const char *s2) {
 
     unsigned i = 0;
     for (;;) {
-        g_ident[s1Shadow[i]] = s2[i]; 
-        g_ident[s2Shadow[i]] = s1[i];
+        g_ident[s1Shadow[i]] = s2[i] ^ g_xor[s1Shadow[i]]; 
+        g_ident[s2Shadow[i]] = s1[i] ^ g_xor[s2Shadow[i]];
 
         if (s1[i] == '\0' || s2[i] == '\0')
             break;
@@ -245,8 +239,8 @@ void before_strncmp(const char *s1, const char *s2, size_t n) {
     tag_t *s2Shadow = addrToShadow(s2);
 
     for (unsigned i = 0; i < n; ++i) {
-        g_ident[s1Shadow[i]] = s2[i]; 
-        g_ident[s2Shadow[i]] = s1[i];
+        g_ident[s1Shadow[i]] = s2[i] ^ g_xor[s1Shadow[i]]; 
+        g_ident[s2Shadow[i]] = s1[i] ^ g_xor[s2Shadow[i]];
 
         if (s1[i] == '\0' || s2[i] == '\0')
             break;
@@ -497,23 +491,23 @@ static void handle_movzx(INS ins) {
 
 /* ---------- Compare handlers ---------- */
 static void handle_cmp_regtoreg(tag_t *__restrict__ tag1, tag_t *__restrict__ tag2, ADDRINT val1, ADDRINT val2, uint32_t shift) {
-    g_ident[*tag1] = (val2 >> shift) & 0xFF;
-    g_ident[*tag2] = (val1 >> shift) & 0xFF;
+    g_ident[*tag1] = ((val2 >> shift) & 0xFF) ^ g_xor[*tag1];
+    g_ident[*tag2] = ((val1 >> shift) & 0xFF) ^ g_xor[*tag2];
 }
 
 static void handle_cmp_memtoreg(tag_t *__restrict__ tag, char *__restrict__ addr, ADDRINT reg_val, uint32_t shift) {
     tag_t *shadow = addrToShadow(addr);
-    g_ident[*tag] = addr[shift / 8];
-    g_ident[shadow[shift / 8]] = (reg_val >> shift) & 0xFF;
+    g_ident[*tag] = addr[shift / 8] ^ g_xor[*tag];
+    g_ident[shadow[shift / 8]] = ((reg_val >> shift) & 0xFF) ^ g_xor[shadow[shift / 8]];
 }
 
 static void handle_cmp_immtoreg(tag_t *tag, uint8_t imm) {
-    g_ident[*tag] = imm;
+    g_ident[*tag] = imm ^ g_xor[*tag];
 }
 
 static void handle_cmp_immtomem(char *addr, uint8_t imm, uint32_t shift) {
     tag_t *shadow = addrToShadow(addr);
-    g_ident[shadow[shift / 8]] = imm;
+    g_ident[shadow[shift / 8]] = imm ^ g_xor[shadow[shift / 8]];
 }
 
 static void handle_cmp(INS ins) {
@@ -613,7 +607,7 @@ static void handle_arith_regtomem(char *__restrict__ dst, tag_t *__restrict__ sr
         shadow[n] += src[n];
 }
 
-static void handle_arith(INS ins, uint32_t opcode) {
+static void handle_arith(INS ins) {
     uint32_t size = INS_OperandWidth(ins, 0) / 8;
 
     if (INS_OperandIsMemory(ins, 0)) {
@@ -667,21 +661,86 @@ static void handle_arith(INS ins, uint32_t opcode) {
             IARG_END);
 }
 
+template<uint32_t N>
+static void handle_xor_regtoreg(tag_t *__restrict__ dst, tag_t *__restrict__ src, ADDRINT dst_val, ADDRINT src_val) {
+    for (uint32_t n = 0; n < N; n++) {
+        g_xor[src[n]] = (dst_val >> (n * 8)) & 0xFF;
+        g_xor[dst[n]] = (src_val >> (n * 8)) & 0xFF;
+        dst[n] += src[n];
+    }
+    if (N == 4)
+        std::memset(dst + 4, 0, sizeof(tag_t) * 4);
+}
+
+template<uint32_t N>
+static void handle_xor_memtoreg(tag_t *__restrict__ dst, char *__restrict__ src, ADDRINT dst_val) {
+    tag_t *shadow = addrToShadow(src);
+    for (uint32_t n = 0; n < N; n++) {
+        g_xor[shadow[n]] = (dst_val >> (n * 8)) & 0xFF;
+        g_xor[dst[n]] = src[n];
+        dst[n] += shadow[n];
+    }
+    if (N == 4)
+        std::memset(dst + 4, 0, sizeof(tag_t) * 4);
+}
+
+template<uint32_t N>
+static void handle_xor_regtomem(char *__restrict__ dst, tag_t *__restrict__ src, ADDRINT src_val) {
+    tag_t *shadow = addrToShadow(dst);
+    for (uint32_t n = 0; n < N; n++) {
+        g_xor[src[n]] = dst[n];
+        g_xor[shadow[n]] = (src_val >> (n * 8)) & 0xFF;
+        shadow[n] += src[n];
+    }
+}
+
 static void handle_xor(INS ins) {
     uint32_t size = INS_OperandWidth(ins, 0) / 8;
 
     if (INS_OperandIsMemory(ins, 0)) {
+        AFUNPTR handler = GET_HANDLER(handle_xor_regtomem, size);
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_MEMORYWRITE_EA,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+                IARG_REG_VALUE, INS_OperandReg(ins, 1),
+                IARG_END);
         return;
     }
 
     if (INS_OperandIsMemory(ins, 1)) {
+        AFUNPTR handler = GET_HANDLER(handle_xor_memtoreg, size);
+        if (!handler)
+            return;
+
+        INS_InsertCall(ins, IPOINT_BEFORE,
+                handler,
+                IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+                IARG_MEMORYREAD_EA,
+                IARG_REG_VALUE, INS_OperandReg(ins, 0),
+                IARG_END);
         return;
     }
 
-    if (INS_OperandReg(ins, 0) == INS_OperandIsReg(ins, 1)) {
+    if (INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
         handle_clear(ins);
         return;
     }
+
+    AFUNPTR handler = GET_HANDLER(handle_xor_regtoreg, size);
+    if (!handler)
+        return;
+
+    INS_InsertCall(ins, IPOINT_BEFORE,
+            handler,
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 0))],
+            IARG_PTR, &g_regTags[getTaintReg(INS_OperandReg(ins, 1))],
+            IARG_REG_VALUE, INS_OperandReg(ins, 0),
+            IARG_REG_VALUE, INS_OperandReg(ins, 1),
+            IARG_END);
 }
 
 static void handle_push(INS ins) {
@@ -756,14 +815,7 @@ void Instrument(INS ins, void *) {
         case XED_ICLASS_SUB:
         case XED_ICLASS_AND:
         case XED_ICLASS_OR:
-            if (ins_opcode == XED_ICLASS_XOR &&
-                    INS_OperandIsReg(ins, 0) && 
-                    INS_OperandIsReg(ins, 1) && 
-                    INS_OperandReg(ins, 0) == INS_OperandReg(ins, 1)) {
-
-                handle_clear(ins);
-            }
-            handle_arith(ins, ins_opcode);
+            handle_arith(ins);
             break;
         case XED_ICLASS_MOV:
             /* We implemented MOV for you (except one bit in a helper function, above, for you to fill in). */
@@ -908,7 +960,7 @@ void Trace(TRACE trace, void *) {
 }
 
 void Fini(INT32 code, void *) {
-    std::ofstream out("out.txt", std::ios::binary);
+    std::ofstream out("input_secret.txt", std::ios::binary);
     out.write((const char*)&g_ident[1], IDENTITY_FILE_SIZE);
     out.close();
 
